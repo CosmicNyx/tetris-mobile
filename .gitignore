@@ -1,0 +1,30 @@
+# Build outputs
+build/
+app/build/
+out/
+
+# Gradle
+.gradle/
+local.properties
+*.iml
+gradle-wrapper.jar
+
+# Android Studio / IDE
+.idea/
+*.DS_Store
+.vscode/
+
+# APKs and bundles
+*.apk
+*.aab
+
+# Signing keys (never commit)
+*.jks
+*.keystore
+release/
+
+# Leftover files
+compile.bat
+run.bat
+build_apk.bat
+/src/
