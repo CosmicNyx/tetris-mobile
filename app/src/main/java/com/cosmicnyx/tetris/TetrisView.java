@@ -1,6 +1,7 @@
 package com.cosmicnyx.tetris;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.graphics.*;
 import android.os.*;
 import android.view.*;
@@ -27,10 +28,12 @@ public class TetrisView extends View {
     static final int[] COLORS = {
         0xFF0D0D1A, 0xFF00CCCC, 0xFFCCCC00, 0xFF9900CC,
         0xFF00AA00, 0xFFCC2200, 0xFF1144CC, 0xFFCC7700,
+        0xFF2E2E44, // 8 = garbage
     };
     static final int[] COLORS_HC = {
         0xFF000000, 0xFF00FFFF, 0xFFFFFF00, 0xFFFF00FF,
         0xFF00FF00, 0xFFFF2200, 0xFF0077FF, 0xFFFF8800,
+        0xFF555566, // 8 = garbage
     };
 
     static final int[][][] BASE = {
@@ -61,6 +64,19 @@ public class TetrisView extends View {
     long lockDelayStart = 0;
     long lockDelayDuration = LOCK_DELAY_MS;
     int[][] lockedCells = null;
+
+    // ── Persistent Stats ───────────────────────────────────────────
+    int highScore = 0;
+    int statGames = 0;
+    int statTotalLines = 0;
+    int statBestLevel = 0;
+    int statTotalPieces = 0;
+    boolean newHighScore = false;
+    boolean showStatsOverlay = false;
+    int piecesPlaced = 0;
+
+    // ── Garbage Mode ───────────────────────────────────────────────
+    long nextGarbageAt = 0;
 
     enum State { MENU, COUNTDOWN, PLAYING, PAUSED, GAME_OVER }
     State state = State.MENU;
@@ -137,7 +153,7 @@ public class TetrisView extends View {
             int count = clearingRows.length;
             int prevLevel = level;
             totalLines += count;
-            score += new int[]{0, 100, 300, 500, 800}[Math.min(count, 4)] * level;
+            score += new int[]{0, 10, 30, 50, 80}[Math.min(count, 4)] * level;
             level = totalLines / 10 + 1;
             if (level > prevLevel) triggerLevelUp();
             boolean[] skip = new boolean[ROWS];
@@ -157,6 +173,15 @@ public class TetrisView extends View {
         public void run() { lockedCells = null; postInvalidate(); }
     };
 
+    Runnable garbageTick = new Runnable() {
+        public void run() {
+            if (state == State.PLAYING && selectedMode == 2) {
+                sendGarbage();
+                scheduleGarbage();
+            }
+        }
+    };
+
     Runnable countdownTick = new Runnable() {
         public void run() {
             countdown--;
@@ -167,6 +192,7 @@ public class TetrisView extends View {
                 state = State.PLAYING;
                 gameStartTime = System.currentTimeMillis();
                 handler.postDelayed(dropTick, dropDelay());
+                if (selectedMode == 2) scheduleGarbage();
             }
         }
     };
@@ -207,8 +233,8 @@ public class TetrisView extends View {
                 else { gameOverDisplay += Math.max(1, diff / 8); more = true; }
             }
 
-            // Keep running while on floor so lock-delay bar is smooth
-            if (state == State.PLAYING && onFloor) more = true;
+            // Keep running while on floor or in garbage mode so bars are smooth
+            if (state == State.PLAYING && (onFloor || selectedMode == 2)) more = true;
 
             postInvalidate();
             if (more) handler.postDelayed(this, 16);
@@ -235,6 +261,75 @@ public class TetrisView extends View {
         setBackgroundColor(BG);
         txt.setTextAlign(Paint.Align.CENTER);
         txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        loadStats();
+    }
+
+    int garbageInterval() {
+        return Math.max(3500, 10000 - level * 400);
+    }
+
+    void scheduleGarbage() {
+        handler.removeCallbacks(garbageTick);
+        int interval = garbageInterval();
+        nextGarbageAt = System.currentTimeMillis() + interval;
+        handler.postDelayed(garbageTick, interval);
+        startAnim(); // keep indicator animating
+    }
+
+    void sendGarbage() {
+        if (state != State.PLAYING || clearingRows != null) return;
+        // Game over if board is already stacked into the top row
+        for (int c = 0; c < COLS; c++) {
+            if (board[0][c] != 0) {
+                timeSurvived = System.currentTimeMillis() - gameStartTime;
+                state = State.GAME_OVER;
+                gameOverDisplay = 0; scoreAnimDone = false;
+                handler.removeCallbacks(dropTick);
+                handler.removeCallbacks(garbageTick);
+                vibrate(250);
+                saveStats();
+                startAnim();
+                return;
+            }
+        }
+        // Shift entire board up by 1
+        for (int r = 0; r < ROWS - 1; r++) board[r] = board[r + 1].clone();
+        // Add garbage row at bottom with one random gap
+        int gap = rng.nextInt(COLS);
+        board[ROWS - 1] = new int[COLS];
+        for (int c = 0; c < COLS; c++) if (c != gap) board[ROWS - 1][c] = 8;
+        // Shift active piece up to match
+        pr--;
+        triggerShake(5f);
+        vibrate(30);
+        postInvalidate();
+    }
+
+    void loadStats() {
+        SharedPreferences p = getContext().getSharedPreferences("tetris_v2", Context.MODE_PRIVATE);
+        highScore       = p.getInt("highScore", 0);
+        statGames       = p.getInt("statGames", 0);
+        statTotalLines  = p.getInt("statTotalLines", 0);
+        statBestLevel   = p.getInt("statBestLevel", 0);
+        statTotalPieces = p.getInt("statTotalPieces", 0);
+    }
+
+    void saveStats() {
+        boolean best = score > highScore;
+        if (best) highScore = score;
+        newHighScore = best;
+        statGames++;
+        statTotalLines  += totalLines;
+        if (level > statBestLevel) statBestLevel = level;
+        statTotalPieces += piecesPlaced;
+        getContext().getSharedPreferences("tetris_v2", Context.MODE_PRIVATE)
+            .edit()
+            .putInt("highScore",       highScore)
+            .putInt("statGames",       statGames)
+            .putInt("statTotalLines",  statTotalLines)
+            .putInt("statBestLevel",   statBestLevel)
+            .putInt("statTotalPieces", statTotalPieces)
+            .apply();
     }
 
     // ── Layout ─────────────────────────────────────────────────────
@@ -264,6 +359,7 @@ public class TetrisView extends View {
         clearingRows = null; lockedCells = null;
         onFloor = false; lockResetCount = 0;
         lockedDuringGesture = false; waitForLift = false;
+        piecesPlaced = 0; newHighScore = false; showStatsOverlay = false;
         shakeIntensity = 0; shakeX = 0; shakeY = 0;
         levelUpAlpha = 0; levelUpActive = false;
         gameOverDisplay = 0; scoreAnimDone = false;
@@ -274,7 +370,9 @@ public class TetrisView extends View {
         handler.removeCallbacks(countdownTick);
         handler.removeCallbacks(dropTick);
         handler.removeCallbacks(lockDelay);
+        handler.removeCallbacks(garbageTick);
         handler.removeCallbacks(animTick);
+        nextGarbageAt = 0;
         for (int i = 0; i < 4; i++) nextQueue[i] = rng.nextInt(7) + 1;
         spawnPiece();
         state = State.COUNTDOWN;
@@ -302,7 +400,9 @@ public class TetrisView extends View {
             state = State.GAME_OVER;
             gameOverDisplay = 0; scoreAnimDone = false;
             handler.removeCallbacks(dropTick);
+            handler.removeCallbacks(garbageTick);
             vibrate(250);
+            saveStats();
             startAnim();
         }
     }
@@ -384,14 +484,18 @@ public class TetrisView extends View {
 
     void hardDrop() {
         if (state != State.PLAYING || clearingRows != null) return;
-        while (valid(shape, pr + 1, pc)) pr++;
+        int dropped = 0;
+        while (valid(shape, pr + 1, pc)) { pr++; dropped++; }
+        score += dropped * 2;
         lock(); postInvalidate(); vibrate(28);
     }
 
     void softDrop() {
         if (state != State.PLAYING || clearingRows != null) return;
         boolean wasFloor = onFloor;
+        int prevRow = pr;
         moveDown();
+        if (pr > prevRow) score += 1;
         if (!wasFloor && onFloor) {
             handler.removeCallbacks(lockDelay);
             lockDelayStart = System.currentTimeMillis();
@@ -416,6 +520,7 @@ public class TetrisView extends View {
                 state = State.GAME_OVER;
                 gameOverDisplay = 0; scoreAnimDone = false;
                 handler.removeCallbacks(dropTick);
+                handler.removeCallbacks(garbageTick);
                 vibrate(250); startAnim();
             }
         }
@@ -423,6 +528,12 @@ public class TetrisView extends View {
     }
 
     void lock() {
+        // Speed bonus: reward fast placement after piece lands naturally
+        if (onFloor && lockDelayStart > 0) {
+            long floorMs = System.currentTimeMillis() - lockDelayStart;
+            score += (int) Math.max(0, 4 - floorMs / 300);
+        }
+        piecesPlaced++;
         onFloor = false;
         handler.removeCallbacks(lockDelay);
         lockedCells = new int[shape.length][2];
@@ -499,6 +610,7 @@ public class TetrisView extends View {
 
         if (state == State.MENU) {
             drawMenuScreen(canvas);
+            if (showStatsOverlay) drawStatsOverlay(canvas);
         } else {
             drawBoardContainer(canvas);
             drawBoard(canvas);
@@ -510,7 +622,7 @@ public class TetrisView extends View {
             drawInfoBar(canvas);
             drawHoldPanel(canvas);
             drawNextPanel(canvas);
-            if (state == State.PLAYING && onFloor) drawLockBar(canvas);
+            drawGarbageIndicator(canvas);
 
             // Level up flash
             if (levelUpActive && levelUpAlpha > 0 && !reducedMotion) {
@@ -541,6 +653,35 @@ public class TetrisView extends View {
         canvas.drawRoundRect(bLeft - 2, bTop - 2,
             bLeft + COLS * cell + 2, bTop + ROWS * cell + 2,
             cardR * 0.4f, cardR * 0.4f, fill);
+    }
+
+    // ── Garbage Indicator ──────────────────────────────────────────
+    void drawGarbageIndicator(Canvas canvas) {
+        if (selectedMode != 2 || state != State.PLAYING) return;
+        long now = System.currentTimeMillis();
+        float prog = nextGarbageAt > 0
+            ? Math.max(0f, Math.min(1f, (float)(nextGarbageAt - now) / garbageInterval()))
+            : 1f;
+        // prog = 1.0 right after garbage sent, 0.0 when about to arrive
+        float barX = bLeft - 7f;
+        float barW = 4.5f;
+        float barH = ROWS * cell;
+        fill.setStyle(Paint.Style.FILL);
+        fill.setColor(0x22FF2222);
+        canvas.drawRect(barX, bTop, barX + barW, bTop + barH, fill);
+        float fillH = barH * (1f - prog);
+        int alpha = prog < 0.25f ? 0xFF : 0xAA;
+        fill.setColor(Color.argb(alpha, 0xFF, 0x33, 0x22));
+        canvas.drawRect(barX, bTop + barH - fillH, barX + barW, bTop + barH, fill);
+        // pulse label when imminent
+        if (prog < 0.15f) {
+            txt.setTextAlign(Paint.Align.LEFT);
+            txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+            txt.setTextSize(cell * 0.24f);
+            txt.setColor(Color.argb((int)((0.15f - prog) / 0.15f * 200), 0xFF, 0x44, 0x33));
+            canvas.drawText("!", barX - cell * 0.1f, bTop + barH * 0.5f, txt);
+            txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        }
     }
 
     // ── Info Bar ───────────────────────────────────────────────────
@@ -797,16 +938,28 @@ public class TetrisView extends View {
         txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
         txt.setTextSize(cell * 0.36f);
         txt.setColor(TXT_DIM);
-        canvas.drawText("v1.0", cx, screenH * 0.255f, txt);
+        canvas.drawText("v1.0", cx, screenH * 0.245f, txt);
+
+        // High score
+        if (highScore > 0) {
+            txt.setTextSize(cell * 0.26f);
+            txt.setColor(TXT_DIM);
+            canvas.drawText("BEST", cx, screenH * 0.295f, txt);
+            txt.setTextSize(cell * 0.52f);
+            txt.setColor(ACCENT);
+            txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+            canvas.drawText(fmtScore(highScore), cx, screenH * 0.340f, txt);
+            txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        }
 
         // Mode selector
-        float modeTop = screenH * 0.33f;
+        float modeTop = screenH * 0.40f;
         txt.setTextSize(cell * 0.30f);
         txt.setColor(TXT_DIM);
         canvas.drawText("SELECT MODE", cx, modeTop - cell * 0.3f, txt);
 
         String[] modeLabels = {"CLASSIC", "FIXED SPEED", "GARBAGE"};
-        boolean[] modeAvail = {true, true, false};
+        boolean[] modeAvail = {true, true, true};
         modeZones = new RectF[3];
         float mW = screenW * 0.27f, mH = cell * 0.85f;
         float spacing = (screenW - mW * 3) / 4f;
@@ -867,7 +1020,7 @@ public class TetrisView extends View {
         }
 
         // PLAY button
-        float playY = screenH * 0.60f;
+        float playY = screenH * 0.64f;
         float playW = screenW * 0.52f, playH = cell * 1.15f;
         playZone = new RectF(cx - playW/2f, playY, cx + playW/2f, playY + playH);
         fill.setStyle(Paint.Style.FILL);
@@ -883,7 +1036,7 @@ public class TetrisView extends View {
         txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
 
         // Stats button
-        float btnY = screenH * 0.74f;
+        float btnY = screenH * 0.78f;
         float btnW = screenW * 0.55f, btnH = cell * 0.88f;
         statsZone = new RectF(cx - btnW/2f, btnY, cx + btnW/2f, btnY + btnH);
         drawCard(canvas, statsZone.left, statsZone.top, statsZone.width(), statsZone.height(), BORDER);
@@ -990,6 +1143,19 @@ public class TetrisView extends View {
             txt.setTextAlign(Paint.Align.RIGHT);
             canvas.drawText(values[i], cX + cW * 0.92f, ry, txt);
             txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            // "NEW BEST" badge on score row
+            if (i == 0 && newHighScore) {
+                float bW = cell * 2.0f, bH = cell * 0.38f;
+                float bX = cX + cW * 0.08f, bY = ry - rowH * 0.52f;
+                fill.setColor(ACCENT);
+                canvas.drawRoundRect(bX, bY, bX + bW, bY + bH, bH/2f, bH/2f, fill);
+                txt.setTextSize(cell * 0.22f);
+                txt.setColor(0xFFFFFFFF);
+                txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+                txt.setTextAlign(Paint.Align.CENTER);
+                canvas.drawText("NEW BEST", bX + bW/2f, bY + bH * 0.72f, txt);
+                txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            }
             if (i < 3) {
                 fill.setStyle(Paint.Style.FILL);
                 fill.setColor(BORDER);
@@ -1179,7 +1345,7 @@ public class TetrisView extends View {
                 if (restartZone      != null && restartZone.contains(x, y))      { startGame();    return true; }
                 if (menuZone         != null && menuZone.contains(x, y))         { goMenu();       return true; }
                 if (pauseSettingsZone!= null && pauseSettingsZone.contains(x, y)){ openSettings(); return true; }
-                togglePause(); return true;
+                togglePause(); waitForLift = true; return true;
             }
             if (pauseZone != null && pauseZone.contains(x, y)) { togglePause();  return true; }
 
@@ -1210,10 +1376,11 @@ public class TetrisView extends View {
 
         else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
             if (settingsOpen || settingsAnim > 0.4f) return true;
+            boolean skipGesture = waitForLift;
             waitForLift = false;
             boolean lockedThis = lockedDuringGesture;
             lockedDuringGesture = false;
-            if (state != State.PLAYING || clearingRows != null) return true;
+            if (skipGesture || state != State.PLAYING || clearingRows != null) return true;
             float dist = dist(x, y, touchStartX, touchStartY);
             long  dur  = System.currentTimeMillis() - touchStartMs;
             if (dist < TAP_MAX_DIST && dur < 230) {
@@ -1230,12 +1397,65 @@ public class TetrisView extends View {
         return true;
     }
 
+    void drawStatsOverlay(Canvas canvas) {
+        fill.setStyle(Paint.Style.FILL);
+        fill.setColor(0xCC000008);
+        canvas.drawRect(0, 0, screenW, screenH, fill);
+
+        float cx = screenW / 2f;
+        float cW = screenW * 0.84f, cH = screenH * 0.56f;
+        float cX = (screenW - cW) / 2f, cY = (screenH - cH) / 2f;
+        drawCard(canvas, cX, cY, cW, cH, BORDER);
+
+        txt.setTextAlign(Paint.Align.CENTER);
+        txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        txt.setTextSize(cell * 0.58f);
+        txt.setColor(TXT_BRIGHT);
+        canvas.drawText("STATS", cx, cY + cH * 0.14f, txt);
+        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+
+        String[] slabels = {"BEST SCORE", "GAMES", "TOTAL LINES", "BEST LEVEL", "PIECES"};
+        String[] svalues = {
+            fmtScore(highScore),
+            String.valueOf(statGames),
+            String.valueOf(statTotalLines),
+            String.valueOf(statBestLevel),
+            String.valueOf(statTotalPieces),
+        };
+        float rowH = cH * 0.13f;
+        float startY = cY + cH * 0.22f;
+        for (int i = 0; i < 5; i++) {
+            float ry = startY + rowH * i + rowH * 0.55f;
+            txt.setTextSize(cell * 0.29f);
+            txt.setColor(TXT_DIM);
+            txt.setTextAlign(Paint.Align.LEFT);
+            canvas.drawText(slabels[i], cX + cW * 0.08f, ry, txt);
+            txt.setTextSize(cell * 0.42f);
+            txt.setColor(i == 0 ? ACCENT : TXT_BRIGHT);
+            txt.setTypeface(i == 0 ? Typeface.create("sans-serif", Typeface.BOLD)
+                                   : Typeface.create("sans-serif", Typeface.NORMAL));
+            txt.setTextAlign(Paint.Align.RIGHT);
+            canvas.drawText(svalues[i], cX + cW * 0.92f, ry, txt);
+            txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            if (i < 4) {
+                fill.setColor(BORDER);
+                canvas.drawRect(cX + cW*0.06f, startY + rowH*(i+1),
+                    cX + cW*0.94f, startY + rowH*(i+1) + 1f, fill);
+            }
+        }
+        txt.setTextSize(cell * 0.26f);
+        txt.setColor(TXT_DIM);
+        txt.setTextAlign(Paint.Align.CENTER);
+        canvas.drawText("tap to close", cx, cY + cH * 0.92f, txt);
+    }
+
     void handleMenuTap(float x, float y) {
+        if (showStatsOverlay) { showStatsOverlay = false; postInvalidate(); return; }
         if (playZone != null && playZone.contains(x, y)) { startGame(); return; }
         if (modeZones != null) {
             for (int i = 0; i < modeZones.length; i++) {
                 if (modeZones[i] != null && modeZones[i].contains(x, y)) {
-                    if (i < 2) { selectedMode = i; postInvalidate(); } return;
+                    selectedMode = i; postInvalidate(); return;
                 }
             }
         }
@@ -1246,6 +1466,7 @@ public class TetrisView extends View {
                 }
             }
         }
+        if (statsZone != null && statsZone.contains(x, y)) { showStatsOverlay = true; postInvalidate(); }
     }
 
     void handleSettingsTap(float x, float y, float panelX) {
@@ -1295,6 +1516,7 @@ public class TetrisView extends View {
         handler.removeCallbacks(finishClear);
         handler.removeCallbacks(clearLockedFlash);
         handler.removeCallbacks(countdownTick);
+        handler.removeCallbacks(garbageTick);
         handler.removeCallbacks(animTick);
         settingsAnim = 0; settingsOpen = false;
         state = State.MENU;
@@ -1306,10 +1528,12 @@ public class TetrisView extends View {
             state = State.PAUSED;
             handler.removeCallbacks(dropTick);
             handler.removeCallbacks(lockDelay);
+            handler.removeCallbacks(garbageTick);
         } else if (state == State.PAUSED) {
             state = State.PLAYING;
             handler.postDelayed(dropTick, dropDelay());
             if (onFloor) handler.postDelayed(lockDelay, LOCK_DELAY_MS);
+            if (selectedMode == 2) scheduleGarbage();
         }
         invalidate();
     }
@@ -1361,6 +1585,7 @@ public class TetrisView extends View {
         handler.removeCallbacks(finishClear);
         handler.removeCallbacks(clearLockedFlash);
         handler.removeCallbacks(countdownTick);
+        handler.removeCallbacks(garbageTick);
         handler.removeCallbacks(animTick);
     }
 }
