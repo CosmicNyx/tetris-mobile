@@ -8,16 +8,16 @@ import android.view.*;
 
 public class TetrisView extends View {
 
-    // ── Design Tokens ─────────────────────────────────────────────
-    static final int BG         = 0xFF06060F;
-    static final int BG_BOARD   = 0xFF0B0B18;
-    static final int BG_CARD    = 0xFF0F0F1E;
-    static final int BORDER     = 0xFF1A1A2C;
-    static final int ACCENT     = 0xFF7B6CF6;
-    static final int ACCENT_DIM = 0xFF2E2A5A;
-    static final int TXT_BRIGHT = 0xFFEEEEFF;
-    static final int TXT_MID    = 0xFF8888AA;
-    static final int TXT_DIM    = 0xFF3A3A55;
+    // ── Design Tokens (mutable — set by applyTheme()) ─────────────
+    int BG         = 0xFF06060F;
+    int BG_BOARD   = 0xFF0B0B18;
+    int BG_CARD    = 0xFF0F0F1E;
+    int BORDER     = 0xFF1A1A2C;
+    int ACCENT     = 0xFF7B6CF6;
+    int ACCENT_DIM = 0xFF2E2A5A;
+    int TXT_BRIGHT = 0xFFEEEEFF;
+    int TXT_MID    = 0xFF8888AA;
+    int TXT_DIM    = 0xFF3A3A55;
 
     // ── Game Constants ─────────────────────────────────────────────
     static final int COLS = 10, ROWS = 20;
@@ -34,6 +34,16 @@ public class TetrisView extends View {
         0xFF000000, 0xFF00FFFF, 0xFFFFFF00, 0xFFFF00FF,
         0xFF00FF00, 0xFFFF2200, 0xFF0077FF, 0xFFFF8800,
         0xFF555566, // 8 = garbage
+    };
+    static final int[] COLORS_GRAY = {
+        0xFF0D0D1A, 0xFFAAAAAA, 0xFFAAAAAA, 0xFFAAAAAA,
+        0xFFAAAAAA, 0xFFAAAAAA, 0xFFAAAAAA, 0xFFAAAAAA,
+        0xFF444455, // 8 = garbage
+    };
+    static final int[] COLORS_GAMEBOY = {
+        0xFF0A2A0A, 0xFF0C120A, 0xFF0C120A, 0xFF0C120A,
+        0xFF0C120A, 0xFF0C120A, 0xFF0C120A, 0xFF0C120A,
+        0xFF162816, // 8 = garbage
     };
 
     static final int[][][] BASE = {
@@ -97,6 +107,8 @@ public class TetrisView extends View {
     boolean hapticsOn     = true;
     boolean reducedMotion = false;
     boolean highContrast  = false;
+    int     colorTheme    = 0;     // 0=Default, 1=Grayscale
+    boolean monoFont      = false;
 
     // ── Animation State ────────────────────────────────────────────
     float   settingsAnim    = 0f;   // 0=hidden, 1=open
@@ -116,7 +128,7 @@ public class TetrisView extends View {
     float cell, bLeft, bTop, footerTop, screenW, screenH, cardR;
 
     RectF pauseZone, gearZone, restartZone, menuZone;
-    RectF playZone, statsZone, settingsBtnZone;
+    RectF playZone, statsZone, settingsBtnZone, resetBestZone, menuSettingsZone;
     RectF[] modeZones;
     RectF[] speedZones;
 
@@ -153,7 +165,7 @@ public class TetrisView extends View {
             int count = clearingRows.length;
             int prevLevel = level;
             totalLines += count;
-            score += new int[]{0, 10, 30, 50, 80}[Math.min(count, 4)] * level;
+            score += new int[]{0, 10, 30, 50, 120}[Math.min(count, 4)] * level;  // Tetris = 120
             level = totalLines / 10 + 1;
             if (level > prevLevel) triggerLevelUp();
             boolean[] skip = new boolean[ROWS];
@@ -237,7 +249,7 @@ public class TetrisView extends View {
             if (state == State.PLAYING && (onFloor || selectedMode == 2)) more = true;
 
             postInvalidate();
-            if (more) handler.postDelayed(this, 16);
+            if (more) handler.postDelayed(this, 33);  // 30fps — saves battery vs 60fps
         }
     };
 
@@ -260,8 +272,9 @@ public class TetrisView extends View {
         super(ctx);
         setBackgroundColor(BG);
         txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
         loadStats();
+        applyTheme();
     }
 
     int garbageInterval() {
@@ -312,6 +325,13 @@ public class TetrisView extends View {
         statTotalLines  = p.getInt("statTotalLines", 0);
         statBestLevel   = p.getInt("statBestLevel", 0);
         statTotalPieces = p.getInt("statTotalPieces", 0);
+        showGhost     = p.getBoolean("showGhost",     true);
+        showGrid      = p.getBoolean("showGrid",      true);
+        reducedMotion = p.getBoolean("reducedMotion", false);
+        highContrast  = p.getBoolean("highContrast",  false);
+        hapticsOn     = p.getBoolean("hapticsOn",     true);
+        monoFont      = p.getBoolean("monoFont",      false);
+        colorTheme    = p.getInt("colorTheme",        0);
     }
 
     void saveStats() {
@@ -598,7 +618,51 @@ public class TetrisView extends View {
         return o;
     }
 
-    int[] palette() { return highContrast ? COLORS_HC : COLORS; }
+    int[] palette() {
+        if (colorTheme == 1) return COLORS_GRAY;
+        if (colorTheme == 2) return COLORS_GAMEBOY;
+        return highContrast ? COLORS_HC : COLORS;
+    }
+
+    String fontName() { return monoFont ? "monospace" : "sans-serif"; }
+
+    int withAlpha(int color, int alpha) { return (alpha << 24) | (color & 0x00FFFFFF); }
+
+    void applyTheme() {
+        if (colorTheme == 1) {  // Grayscale — true black BG saves OLED power
+            BG         = 0xFF000000;
+            BG_BOARD   = 0xFF0F0F0F;
+            BG_CARD    = 0xFF181818;
+            BORDER     = 0xFF303030;
+            ACCENT     = 0xFFBBBBBB;
+            ACCENT_DIM = 0xFF282828;
+            TXT_BRIGHT = 0xFFEEEEEE;
+            TXT_MID    = 0xFF888888;
+            TXT_DIM    = 0xFF444444;
+        } else if (colorTheme == 2) {  // Game Boy
+            BG         = 0xFF0F380F;
+            BG_BOARD   = 0xFF0A2A0A;
+            BG_CARD    = 0xFF143814;
+            BORDER     = 0xFF1E4A1E;
+            ACCENT     = 0xFF6B8C10;
+            ACCENT_DIM = 0xFF1A3A1A;
+            TXT_BRIGHT = 0xFF6B8C10;
+            TXT_MID    = 0xFF4E6E10;
+            TXT_DIM    = 0xFF2E5018;
+        } else {                // Default
+            BG         = 0xFF06060F;
+            BG_BOARD   = 0xFF0B0B18;
+            BG_CARD    = 0xFF0F0F1E;
+            BORDER     = 0xFF1A1A2C;
+            ACCENT     = 0xFF7B6CF6;
+            ACCENT_DIM = 0xFF2E2A5A;
+            TXT_BRIGHT = 0xFFEEEEFF;
+            TXT_MID    = 0xFF8888AA;
+            TXT_DIM    = 0xFF3A3A55;
+        }
+        setBackgroundColor(BG);
+        postInvalidate();
+    }
 
     // ── onDraw ─────────────────────────────────────────────────────
     @Override
@@ -631,9 +695,9 @@ public class TetrisView extends View {
                 txt.setTextSize(cell * 1.1f);
                 txt.setColor(Color.argb(levelUpAlpha, 255, 255, 255));
                 txt.setTextAlign(Paint.Align.CENTER);
-                txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+                txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
                 canvas.drawText("LEVEL  " + level, screenW / 2f, screenH * 0.44f, txt);
-                txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+                txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
             }
 
             if      (state == State.GAME_OVER) drawGameOverScreen(canvas);
@@ -676,34 +740,48 @@ public class TetrisView extends View {
         // pulse label when imminent
         if (prog < 0.15f) {
             txt.setTextAlign(Paint.Align.LEFT);
-            txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+            txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
             txt.setTextSize(cell * 0.24f);
             txt.setColor(Color.argb((int)((0.15f - prog) / 0.15f * 200), 0xFF, 0x44, 0x33));
             canvas.drawText("!", barX - cell * 0.1f, bTop + barH * 0.5f, txt);
-            txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
         }
     }
 
     // ── Info Bar ───────────────────────────────────────────────────
     void drawInfoBar(Canvas canvas) {
         float barH = bTop;
+
+        // Background card
+        fill.setStyle(Paint.Style.FILL);
+        fill.setColor(BG_CARD);
+        canvas.drawRect(0, 0, screenW, barH, fill);
+        // Bottom separator line
+        fill.setColor(BORDER);
+        canvas.drawRect(0, barH - 1.5f, screenW, barH, fill);
+
         String[] labels = {"SCORE", "LEVEL", "LINES"};
         String[] values = {fmtScore(score), String.valueOf(level), String.valueOf(totalLines)};
         float sw = screenW / 3f;
 
         for (int i = 0; i < 3; i++) {
             float cx = sw * i + sw / 2f;
+            // Divider between columns
+            if (i > 0) {
+                fill.setColor(BORDER);
+                canvas.drawRect(sw * i - 0.75f, barH * 0.15f, sw * i + 0.75f, barH * 0.85f, fill);
+            }
             txt.setTextAlign(Paint.Align.CENTER);
-            txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-            txt.setTextSize(barH * 0.26f);
-            txt.setColor(TXT_DIM);
-            canvas.drawText(labels[i], cx, barH * 0.30f, txt);
-            txt.setTextSize(barH * 0.45f);
+            txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
+            txt.setTextSize(barH * 0.28f);
+            txt.setColor(TXT_MID);
+            canvas.drawText(labels[i], cx, barH * 0.32f, txt);
+            txt.setTextSize(barH * 0.50f);
             txt.setColor(i == 0 ? ACCENT : TXT_BRIGHT);
-            txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
-            canvas.drawText(values[i], cx, barH * 0.80f, txt);
+            txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
+            canvas.drawText(values[i], cx, barH * 0.84f, txt);
         }
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
 
         // Pause button — manually drawn, no emoji (avoids colored-emoji rendering)
         if (state == State.PLAYING || state == State.PAUSED) {
@@ -746,7 +824,7 @@ public class TetrisView extends View {
         txt.setTextSize(lH * 0.52f);
         txt.setColor(canHold ? TXT_MID : TXT_DIM);
         txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
         canvas.drawText("HOLD", pX + pW / 2f, pY + lH * 0.72f, txt);
         if (holdType != 0) {
             float cs = Math.min(pW / 5.5f, (pH - lH) / 2.3f);
@@ -768,7 +846,7 @@ public class TetrisView extends View {
         txt.setTextSize(lH * 0.52f);
         txt.setColor(TXT_MID);
         txt.setTextAlign(Paint.Align.LEFT);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
         canvas.drawText("NEXT", pX + pW * 0.05f, pY + lH * 0.72f, txt);
 
         float slotW = pW / 4f;
@@ -931,11 +1009,11 @@ public class TetrisView extends View {
 
         // Title
         txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
         txt.setTextSize(cell * 2.3f);
         txt.setColor(TXT_BRIGHT);
         canvas.drawText("TETRIS", cx, screenH * 0.19f, txt);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
         txt.setTextSize(cell * 0.36f);
         txt.setColor(TXT_DIM);
         canvas.drawText("v1.0", cx, screenH * 0.245f, txt);
@@ -947,9 +1025,9 @@ public class TetrisView extends View {
             canvas.drawText("BEST", cx, screenH * 0.295f, txt);
             txt.setTextSize(cell * 0.52f);
             txt.setColor(ACCENT);
-            txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+            txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
             canvas.drawText(fmtScore(highScore), cx, screenH * 0.340f, txt);
-            txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
         }
 
         // Mode selector
@@ -980,10 +1058,10 @@ public class TetrisView extends View {
             }
             txt.setTextSize(cell * 0.34f);
             txt.setColor(sel ? 0xFFFFFFFF : (modeAvail[i] ? TXT_MID : TXT_DIM));
-            txt.setTypeface(sel ? Typeface.create("sans-serif", Typeface.BOLD)
-                                : Typeface.create("sans-serif", Typeface.NORMAL));
+            txt.setTypeface(sel ? Typeface.create(fontName(), Typeface.BOLD)
+                                : Typeface.create(fontName(), Typeface.NORMAL));
             canvas.drawText(modeLabels[i], mx + mW / 2f, my + mH * 0.67f, txt);
-            txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
             if (!modeAvail[i]) {
                 txt.setTextSize(cell * 0.22f);
                 txt.setColor(TXT_DIM);
@@ -1010,10 +1088,10 @@ public class TetrisView extends View {
                 canvas.drawRoundRect(speedZones[i], cardR * 0.4f, cardR * 0.4f, fill);
                 txt.setTextSize(cell * 0.30f);
                 txt.setColor(sel ? 0xFFFFFFFF : TXT_MID);
-                txt.setTypeface(sel ? Typeface.create("sans-serif", Typeface.BOLD)
-                                    : Typeface.create("sans-serif", Typeface.NORMAL));
+                txt.setTypeface(sel ? Typeface.create(fontName(), Typeface.BOLD)
+                                    : Typeface.create(fontName(), Typeface.NORMAL));
                 canvas.drawText(FIXED_LABELS[i], sx + sW / 2f, sy + sH * 0.68f, txt);
-                txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+                txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
             }
         } else {
             speedZones = null;
@@ -1031,18 +1109,30 @@ public class TetrisView extends View {
             playZone.top + playH * 0.45f, cardR * 0.7f, cardR * 0.7f, fill);
         txt.setTextSize(cell * 0.58f);
         txt.setColor(0xFFFFFFFF);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
         canvas.drawText("PLAY", cx, playY + playH * 0.68f, txt);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
 
-        // Stats button
-        float btnY = screenH * 0.78f;
-        float btnW = screenW * 0.55f, btnH = cell * 0.88f;
-        statsZone = new RectF(cx - btnW/2f, btnY, cx + btnW/2f, btnY + btnH);
+        // Stats + Settings buttons side by side
+        float btnY  = screenH * 0.78f;
+        float btnH  = cell * 0.88f;
+        float btnW  = screenW * 0.40f;
+        float gap   = screenW * 0.04f;
+        float totalW = btnW * 2 + gap;
+        float startX = cx - totalW / 2f;
+
+        statsZone = new RectF(startX, btnY, startX + btnW, btnY + btnH);
         drawCard(canvas, statsZone.left, statsZone.top, statsZone.width(), statsZone.height(), BORDER);
         txt.setTextSize(cell * 0.38f);
         txt.setColor(TXT_MID);
-        canvas.drawText("STATS", cx, btnY + btnH * 0.67f, txt);
+        canvas.drawText("STATS", statsZone.centerX(), btnY + btnH * 0.67f, txt);
+
+        float sX = startX + btnW + gap;
+        menuSettingsZone = new RectF(sX, btnY, sX + btnW, btnY + btnH);
+        drawCard(canvas, menuSettingsZone.left, menuSettingsZone.top, menuSettingsZone.width(), menuSettingsZone.height(), BORDER);
+        txt.setTextSize(cell * 0.38f);
+        txt.setColor(TXT_MID);
+        canvas.drawText("\u2699  SETTINGS", menuSettingsZone.centerX(), btnY + btnH * 0.67f, txt);
 
     }
 
@@ -1052,16 +1142,16 @@ public class TetrisView extends View {
     void drawPauseOverlay(Canvas canvas) {
         float right = bLeft + COLS * cell, bottom = bTop + ROWS * cell;
         fill.setStyle(Paint.Style.FILL);
-        fill.setColor(0xEE06060F);
+        fill.setColor(withAlpha(BG, 0xEE));
         canvas.drawRect(bLeft, bTop, right, bottom, fill);
         float cx = (bLeft + right) / 2f, cy = (bTop + bottom) / 2f;
 
         txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
         txt.setTextSize(cell * 1.1f);
         txt.setColor(TXT_BRIGHT);
         canvas.drawText("PAUSED", cx, cy - cell * 1.5f, txt);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
 
         // Score summary
         txt.setTextSize(cell * 0.38f);
@@ -1086,9 +1176,9 @@ public class TetrisView extends View {
         canvas.drawRect(restartZone, fill);
         txt.setTextSize(cell * 0.38f);
         txt.setColor(0xFFFFFFFF);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
         canvas.drawText("RESTART", cx, bT + bH * 0.67f, txt);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
 
         // SETTINGS
         float sT = bT + bH + gap;
@@ -1110,16 +1200,16 @@ public class TetrisView extends View {
     // ── Game Over Screen ───────────────────────────────────────────
     void drawGameOverScreen(Canvas canvas) {
         fill.setStyle(Paint.Style.FILL);
-        fill.setColor(0xF206060F);
+        fill.setColor(withAlpha(BG, 0xF2));
         canvas.drawRect(0, 0, screenW, screenH, fill);
         float cx = screenW / 2f;
 
         txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
         txt.setTextSize(cell * 1.5f);
         txt.setColor(TXT_BRIGHT);
         canvas.drawText("GAME OVER", cx, screenH * 0.18f, txt);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
 
         // Stats card
         float cX = screenW * 0.09f, cW = screenW * 0.82f;
@@ -1138,11 +1228,11 @@ public class TetrisView extends View {
             canvas.drawText(labels[i], cX + cW * 0.08f, ry, txt);
             txt.setTextSize(cell * 0.46f);
             txt.setColor(i == 0 ? ACCENT : TXT_BRIGHT);
-            txt.setTypeface(i == 0 ? Typeface.create("sans-serif", Typeface.BOLD)
-                                   : Typeface.create("sans-serif", Typeface.NORMAL));
+            txt.setTypeface(i == 0 ? Typeface.create(fontName(), Typeface.BOLD)
+                                   : Typeface.create(fontName(), Typeface.NORMAL));
             txt.setTextAlign(Paint.Align.RIGHT);
             canvas.drawText(values[i], cX + cW * 0.92f, ry, txt);
-            txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
             // "NEW BEST" badge on score row
             if (i == 0 && newHighScore) {
                 float bW = cell * 2.0f, bH = cell * 0.38f;
@@ -1151,10 +1241,10 @@ public class TetrisView extends View {
                 canvas.drawRoundRect(bX, bY, bX + bW, bY + bH, bH/2f, bH/2f, fill);
                 txt.setTextSize(cell * 0.22f);
                 txt.setColor(0xFFFFFFFF);
-                txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+                txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
                 txt.setTextAlign(Paint.Align.CENTER);
                 canvas.drawText("NEW BEST", bX + bW/2f, bY + bH * 0.72f, txt);
-                txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+                txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
             }
             if (i < 3) {
                 fill.setStyle(Paint.Style.FILL);
@@ -1175,10 +1265,10 @@ public class TetrisView extends View {
         canvas.drawRoundRect(restartZone, cardR * 0.5f, cardR * 0.5f, fill);
         txt.setTextSize(cell * 0.40f);
         txt.setColor(0xFFFFFFFF);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
         txt.setTextAlign(Paint.Align.CENTER);
         canvas.drawText("RESTART", restartZone.centerX(), btnY + btnH * 0.67f, txt);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
 
         drawCard(canvas, menuZone.left, menuZone.top, menuZone.width(), menuZone.height(), BORDER);
         txt.setTextSize(cell * 0.40f);
@@ -1190,19 +1280,19 @@ public class TetrisView extends View {
     void drawCountdownOverlay(Canvas canvas) {
         float right = bLeft + COLS*cell, bottom = bTop + ROWS*cell;
         fill.setStyle(Paint.Style.FILL);
-        fill.setColor(0xCC06060F);
+        fill.setColor(withAlpha(BG, 0xCC));
         canvas.drawRect(bLeft, bTop, right, bottom, fill);
         float cx = (bLeft + right) / 2f, cy = (bTop + bottom) / 2f;
         txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
         txt.setTextSize(cell * 0.44f);
         txt.setColor(TXT_DIM);
         canvas.drawText("get ready", cx, cy - cell * 1.6f, txt);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
         txt.setTextSize(cell * 4.2f);
         txt.setColor(ACCENT);
         canvas.drawText(String.valueOf(countdown), cx, cy + cell * 1.6f, txt);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
     }
 
     // ── Settings Panel ─────────────────────────────────────────────
@@ -1232,28 +1322,34 @@ public class TetrisView extends View {
         float y  = screenH * 0.07f;
 
         txt.setTextAlign(Paint.Align.LEFT);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
         txt.setTextSize(cell * 0.62f);
         txt.setColor(TXT_BRIGHT);
         canvas.drawText("SETTINGS", px + mg, y, txt);
         txt.setTextAlign(Paint.Align.RIGHT);
         txt.setTextSize(cell * 0.52f);
         txt.setColor(TXT_MID);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
         canvas.drawText("\u2715", screenW - mg, y, txt);
 
         y += cell * 0.8f;
 
         Object[][] items = {
-            {"GAME",         null},
-            {"Ghost Piece",  "showGhost"},
-            {"Grid Lines",   "showGrid"},
-            {"VISUAL",       null},
-            {"Reduce Motion","reducedMotion"},
-            {"ACCESSIBILITY",null},
-            {"High Contrast","highContrast"},
-            {"HAPTICS",      null},
-            {"Vibration",    "hapticsOn"},
+            {"GAME",          null},
+            {"Ghost Piece",   "showGhost"},
+            {"Grid Lines",    "showGrid"},
+            {"VISUAL",        null},
+            {"Reduce Motion", "reducedMotion"},
+            {"ACCESSIBILITY", null},
+            {"High Contrast", "highContrast"},
+            {"HAPTICS",       null},
+            {"Vibration",     "hapticsOn"},
+            {"COLOR THEME",   null},
+            {"Default",       "theme:0"},
+            {"Grayscale",     "theme:1"},
+            {"Game Boy",      "theme:2"},
+            {"FONT",          null},
+            {"Monospace",     "monoFont"},
         };
 
         for (Object[] item : items) {
@@ -1264,30 +1360,50 @@ public class TetrisView extends View {
                 txt.setTextAlign(Paint.Align.LEFT);
                 txt.setTextSize(cell * 0.28f);
                 txt.setColor(ACCENT);
-                txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+                txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
                 canvas.drawText(label, px + mg, y, txt);
+                fill.setStyle(Paint.Style.FILL);
                 fill.setColor(ACCENT_DIM);
                 canvas.drawRect(px + mg, y + cell * 0.08f, screenW - mg, y + cell * 0.09f, fill);
-                txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+                txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
                 y += cell * 0.55f;
             } else {
+                boolean isRadio = key.startsWith("theme:");
                 float rH = cell * 0.85f;
                 txt.setTextAlign(Paint.Align.LEFT);
                 txt.setTextSize(cell * 0.37f);
-                txt.setColor(TXT_BRIGHT);
-                txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-                canvas.drawText(label, px + mg, y + rH * 0.63f, txt);
+                txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
 
-                boolean on = getSetting(key);
-                float swW = cell * 1.1f, swH = cell * 0.52f;
-                float swX = screenW - mg - swW, swY = y + (rH - swH) / 2f;
-                fill.setColor(on ? ACCENT : BORDER);
-                canvas.drawRoundRect(swX, swY, swX + swW, swY + swH, swH/2f, swH/2f, fill);
-                float kR = swH * 0.40f;
-                float kX = on ? swX + swW - kR - swH*0.1f : swX + kR + swH*0.1f;
-                fill.setColor(0xFFFFFFFF);
-                canvas.drawCircle(kX, swY + swH/2f, kR, fill);
-
+                if (isRadio) {
+                    int themeVal = Integer.parseInt(key.substring(6));
+                    boolean sel = (colorTheme == themeVal);
+                    txt.setColor(sel ? TXT_BRIGHT : TXT_MID);
+                    canvas.drawText(label, px + mg, y + rH * 0.63f, txt);
+                    float rR = cell * 0.22f;
+                    float rX = screenW - mg - rR, rY = y + rH / 2f;
+                    fill.setStyle(Paint.Style.STROKE);
+                    fill.setStrokeWidth(1.8f);
+                    fill.setColor(sel ? ACCENT : BORDER);
+                    canvas.drawCircle(rX, rY, rR, fill);
+                    fill.setStyle(Paint.Style.FILL);
+                    if (sel) {
+                        fill.setColor(ACCENT);
+                        canvas.drawCircle(rX, rY, rR * 0.52f, fill);
+                    }
+                } else {
+                    txt.setColor(TXT_BRIGHT);
+                    canvas.drawText(label, px + mg, y + rH * 0.63f, txt);
+                    boolean on = getSetting(key);
+                    float swW = cell * 1.1f, swH = cell * 0.52f;
+                    float swX = screenW - mg - swW, swY = y + (rH - swH) / 2f;
+                    fill.setStyle(Paint.Style.FILL);
+                    fill.setColor(on ? ACCENT : BORDER);
+                    canvas.drawRoundRect(swX, swY, swX + swW, swY + swH, swH/2f, swH/2f, fill);
+                    float kR = swH * 0.40f;
+                    float kX = on ? swX + swW - kR - swH*0.1f : swX + kR + swH*0.1f;
+                    fill.setColor(0xFFFFFFFF);
+                    canvas.drawCircle(kX, swY + swH/2f, kR, fill);
+                }
                 y += rH;
             }
         }
@@ -1300,6 +1416,7 @@ public class TetrisView extends View {
             case "reducedMotion":return reducedMotion;
             case "highContrast": return highContrast;
             case "hapticsOn":    return hapticsOn;
+            case "monoFont":     return monoFont;
             default:             return false;
         }
     }
@@ -1311,8 +1428,22 @@ public class TetrisView extends View {
             case "reducedMotion":reducedMotion = !reducedMotion; break;
             case "highContrast": highContrast  = !highContrast;  break;
             case "hapticsOn":    hapticsOn     = !hapticsOn;     break;
+            case "monoFont":     monoFont      = !monoFont;      break;
         }
+        saveSettings();
         postInvalidate();
+    }
+
+    void saveSettings() {
+        getContext().getSharedPreferences("tetris_v2", Context.MODE_PRIVATE).edit()
+            .putBoolean("showGhost",    showGhost)
+            .putBoolean("showGrid",     showGrid)
+            .putBoolean("reducedMotion",reducedMotion)
+            .putBoolean("highContrast", highContrast)
+            .putBoolean("hapticsOn",    hapticsOn)
+            .putBoolean("monoFont",     monoFont)
+            .putInt("colorTheme",       colorTheme)
+            .apply();
     }
 
     // ── Touch ──────────────────────────────────────────────────────
@@ -1399,7 +1530,7 @@ public class TetrisView extends View {
 
     void drawStatsOverlay(Canvas canvas) {
         fill.setStyle(Paint.Style.FILL);
-        fill.setColor(0xCC000008);
+        fill.setColor(withAlpha(BG, 0xCC));
         canvas.drawRect(0, 0, screenW, screenH, fill);
 
         float cx = screenW / 2f;
@@ -1408,11 +1539,11 @@ public class TetrisView extends View {
         drawCard(canvas, cX, cY, cW, cH, BORDER);
 
         txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
         txt.setTextSize(cell * 0.58f);
         txt.setColor(TXT_BRIGHT);
         canvas.drawText("STATS", cx, cY + cH * 0.14f, txt);
-        txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
 
         String[] slabels = {"BEST SCORE", "GAMES", "TOTAL LINES", "BEST LEVEL", "PIECES"};
         String[] svalues = {
@@ -1432,25 +1563,50 @@ public class TetrisView extends View {
             canvas.drawText(slabels[i], cX + cW * 0.08f, ry, txt);
             txt.setTextSize(cell * 0.42f);
             txt.setColor(i == 0 ? ACCENT : TXT_BRIGHT);
-            txt.setTypeface(i == 0 ? Typeface.create("sans-serif", Typeface.BOLD)
-                                   : Typeface.create("sans-serif", Typeface.NORMAL));
+            txt.setTypeface(i == 0 ? Typeface.create(fontName(), Typeface.BOLD)
+                                   : Typeface.create(fontName(), Typeface.NORMAL));
             txt.setTextAlign(Paint.Align.RIGHT);
             canvas.drawText(svalues[i], cX + cW * 0.92f, ry, txt);
-            txt.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
             if (i < 4) {
                 fill.setColor(BORDER);
                 canvas.drawRect(cX + cW*0.06f, startY + rowH*(i+1),
                     cX + cW*0.94f, startY + rowH*(i+1) + 1f, fill);
             }
         }
+        // Reset best score button
+        float rBtnW = cW * 0.52f, rBtnH = cell * 0.72f;
+        float rBtnX = cx - rBtnW / 2f, rBtnY = cY + cH * 0.77f;
+        resetBestZone = new RectF(rBtnX, rBtnY, rBtnX + rBtnW, rBtnY + rBtnH);
+        fill.setStyle(Paint.Style.STROKE);
+        fill.setStrokeWidth(1.5f);
+        fill.setColor(0xFF663333);
+        canvas.drawRoundRect(resetBestZone, cardR * 0.5f, cardR * 0.5f, fill);
+        fill.setStyle(Paint.Style.FILL);
+        txt.setTextSize(cell * 0.30f);
+        txt.setColor(0xFFCC4444);
+        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
+        txt.setTextAlign(Paint.Align.CENTER);
+        canvas.drawText("RESET BEST SCORE", cx, rBtnY + rBtnH * 0.66f, txt);
+        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
+
         txt.setTextSize(cell * 0.26f);
         txt.setColor(TXT_DIM);
         txt.setTextAlign(Paint.Align.CENTER);
-        canvas.drawText("tap to close", cx, cY + cH * 0.92f, txt);
+        canvas.drawText("tap anywhere else to close", cx, cY + cH * 0.95f, txt);
     }
 
     void handleMenuTap(float x, float y) {
-        if (showStatsOverlay) { showStatsOverlay = false; postInvalidate(); return; }
+        if (showStatsOverlay) {
+            if (resetBestZone != null && resetBestZone.contains(x, y)) {
+                highScore = 0; statGames = 0; statTotalLines = 0;
+                statBestLevel = 0; statTotalPieces = 0;
+                getContext().getSharedPreferences("tetris_v2", Context.MODE_PRIVATE)
+                    .edit().clear().apply();
+                vibrate(40);
+            }
+            showStatsOverlay = false; postInvalidate(); return;
+        }
         if (playZone != null && playZone.contains(x, y)) { startGame(); return; }
         if (modeZones != null) {
             for (int i = 0; i < modeZones.length; i++) {
@@ -1466,7 +1622,8 @@ public class TetrisView extends View {
                 }
             }
         }
-        if (statsZone != null && statsZone.contains(x, y)) { showStatsOverlay = true; postInvalidate(); }
+        if (statsZone != null && statsZone.contains(x, y)) { showStatsOverlay = true; postInvalidate(); return; }
+        if (menuSettingsZone != null && menuSettingsZone.contains(x, y)) { openSettings(); }
     }
 
     void handleSettingsTap(float x, float y, float panelX) {
@@ -1476,15 +1633,21 @@ public class TetrisView extends View {
 
         // Reconstruct toggle y positions and check taps
         Object[][] items = {
-            {"GAME",         null},
-            {"Ghost Piece",  "showGhost"},
-            {"Grid Lines",   "showGrid"},
-            {"VISUAL",       null},
-            {"Reduce Motion","reducedMotion"},
-            {"ACCESSIBILITY",null},
-            {"High Contrast","highContrast"},
-            {"HAPTICS",      null},
-            {"Vibration",    "hapticsOn"},
+            {"GAME",          null},
+            {"Ghost Piece",   "showGhost"},
+            {"Grid Lines",    "showGrid"},
+            {"VISUAL",        null},
+            {"Reduce Motion", "reducedMotion"},
+            {"ACCESSIBILITY", null},
+            {"High Contrast", "highContrast"},
+            {"HAPTICS",       null},
+            {"Vibration",     "hapticsOn"},
+            {"COLOR THEME",   null},
+            {"Default",       "theme:0"},
+            {"Grayscale",     "theme:1"},
+            {"Game Boy",      "theme:2"},
+            {"FONT",          null},
+            {"Monospace",     "monoFont"},
         };
         float fy = screenH * 0.07f + cell * 0.8f;
         for (Object[] item : items) {
@@ -1492,7 +1655,16 @@ public class TetrisView extends View {
             if (key == null) { fy += cell * 0.18f + cell * 0.55f; }
             else {
                 float rH = cell * 0.85f;
-                if (y >= fy && y <= fy + rH) { toggleSetting(key); return; }
+                if (y >= fy && y <= fy + rH) {
+                    if (key.startsWith("theme:")) {
+                        colorTheme = Integer.parseInt(key.substring(6));
+                        saveSettings();
+                        applyTheme();
+                    } else {
+                        toggleSetting(key);
+                    }
+                    return;
+                }
                 fy += rH;
             }
         }
