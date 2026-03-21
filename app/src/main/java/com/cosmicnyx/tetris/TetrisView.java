@@ -1,5 +1,7 @@
 package com.cosmicnyx.tetris;
 
+import static com.cosmicnyx.tetris.GameData.*;
+
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.*;
@@ -15,55 +17,35 @@ public class TetrisView extends View {
     int BORDER     = 0xFF1A1A2C;
     int ACCENT     = 0xFF7B6CF6;
     int ACCENT_DIM = 0xFF2E2A5A;
+    int ON_ACCENT  = 0xFFFFFFFF;  // text color when placed on an ACCENT background
     int TXT_BRIGHT = 0xFFEEEEFF;
     int TXT_MID    = 0xFF8888AA;
     int TXT_DIM    = 0xFF3A3A55;
 
-    // ── Game Constants ─────────────────────────────────────────────
-    static final int COLS = 10, ROWS = 20;
-    static final int LOCK_DELAY_MS  = 1500;
-    static final int SOFT_LOCK_MS   =  350;
-    static final int MAX_LOCK_MOVES = 15;
-
-    static final int[] COLORS = {
-        0xFF0D0D1A, 0xFF00CCCC, 0xFFCCCC00, 0xFF9900CC,
-        0xFF00AA00, 0xFFCC2200, 0xFF1144CC, 0xFFCC7700,
-        0xFF2E2E44, // 8 = garbage
+    // ── SRS I-piece data ───────────────────────────────────────────
+    // Position corrections (Δrow, Δcol) after generic rotation, indexed by from-state.
+    // These shift the piece so the rotation center is at the SRS gridline intersection.
+    static final int[][] I_CORR_CW  = {{-1,2},{2,-2},{-2,1},{1,-1}};
+    static final int[][] I_CORR_CCW = {{-1,1},{1,-2},{-2,2},{2,-1}};
+    // SRS wall kicks (Δrow, Δcol) to try in order, indexed by from-state.
+    static final int[][][] I_KICKS_CW = {
+        {{0,0},{0,-2},{0,1},{-1,-2},{2,1}},   // state 0 → 1
+        {{0,0},{0,-1},{0,2},{2,-1},{-1,2}},   // state 1 → 2
+        {{0,0},{0,2},{0,-1},{1,2},{-2,-1}},   // state 2 → 3
+        {{0,0},{0,1},{0,-2},{-2,1},{1,-2}},   // state 3 → 0
     };
-    static final int[] COLORS_HC = {
-        0xFF000000, 0xFF00FFFF, 0xFFFFFF00, 0xFFFF00FF,
-        0xFF00FF00, 0xFFFF2200, 0xFF0077FF, 0xFFFF8800,
-        0xFF555566, // 8 = garbage
+    static final int[][][] I_KICKS_CCW = {
+        {{0,0},{0,-1},{0,2},{2,-1},{-1,2}},   // state 0 → 3
+        {{0,0},{0,2},{0,-1},{1,2},{-2,-1}},   // state 1 → 0
+        {{0,0},{0,1},{0,-2},{-2,1},{1,-2}},   // state 2 → 1
+        {{0,0},{0,-2},{0,1},{-1,-2},{2,1}},   // state 3 → 2
     };
-    static final int[] COLORS_GRAY = {
-        0xFF0D0D1A, 0xFFAAAAAA, 0xFFAAAAAA, 0xFFAAAAAA,
-        0xFFAAAAAA, 0xFFAAAAAA, 0xFFAAAAAA, 0xFFAAAAAA,
-        0xFF444455, // 8 = garbage
-    };
-    static final int[] COLORS_GAMEBOY = {
-        0xFF0A2A0A, 0xFF0C120A, 0xFF0C120A, 0xFF0C120A,
-        0xFF0C120A, 0xFF0C120A, 0xFF0C120A, 0xFF0C120A,
-        0xFF162816, // 8 = garbage
-    };
-
-    static final int[][][] BASE = {
-        null,
-        {{0,0},{0,1},{0,2},{0,3}},
-        {{0,0},{0,1},{1,0},{1,1}},
-        {{0,1},{1,0},{1,1},{1,2}},
-        {{0,1},{0,2},{1,0},{1,1}},
-        {{0,0},{0,1},{1,1},{1,2}},
-        {{0,0},{1,0},{1,1},{1,2}},
-        {{0,2},{1,0},{1,1},{1,2}},
-    };
-
-    static final int[] FIXED_DELAYS = {500, 300, 150, 80};
-    static final String[] FIXED_LABELS = {"SLOW", "MED", "FAST", "ULTRA"};
 
     // ── Game State ─────────────────────────────────────────────────
     int[][] board = new int[ROWS][COLS];
     int[][] shape;
     int type, pr, pc;
+    int iState = 0;  // I-piece rotation state: 0=horiz, 1=CW-vert, 2=180, 3=CCW-vert
     int score, totalLines, level;
     int[] nextQueue = new int[4];
     int holdType = 0;
@@ -129,12 +111,16 @@ public class TetrisView extends View {
 
     RectF pauseZone, gearZone, restartZone, menuZone;
     RectF playZone, statsZone, settingsBtnZone, resetBestZone, menuSettingsZone;
+    RectF pauseSettingsZone;
     RectF[] modeZones;
     RectF[] speedZones;
 
     // ── Paints ─────────────────────────────────────────────────────
     Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     Paint txt  = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+    // ── Renderer ───────────────────────────────────────────────────
+    Renderer renderer;
 
     // ── Handler ────────────────────────────────────────────────────
     Handler handler = new Handler(Looper.getMainLooper());
@@ -275,6 +261,7 @@ public class TetrisView extends View {
         txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
         loadStats();
         applyTheme();
+        renderer = new Renderer(this);
     }
 
     int garbageInterval() {
@@ -291,9 +278,10 @@ public class TetrisView extends View {
 
     void sendGarbage() {
         if (state != State.PLAYING || clearingRows != null) return;
-        // Game over if board is already stacked into the top row
+        int rows = 3 + rng.nextInt(3);  // 3, 4, or 5 rows
+        // Game over if board doesn't have enough empty rows at top
         for (int c = 0; c < COLS; c++) {
-            if (board[0][c] != 0) {
+            if (board[rows - 1][c] != 0) {
                 timeSurvived = System.currentTimeMillis() - gameStartTime;
                 state = State.GAME_OVER;
                 gameOverDisplay = 0; scoreAnimDone = false;
@@ -305,15 +293,17 @@ public class TetrisView extends View {
                 return;
             }
         }
-        // Shift entire board up by 1
-        for (int r = 0; r < ROWS - 1; r++) board[r] = board[r + 1].clone();
-        // Add garbage row at bottom with one random gap
+        // Shift entire board up by `rows`
+        for (int r = 0; r < ROWS - rows; r++) board[r] = board[r + rows].clone();
+        // Add garbage rows at bottom — same gap column per wave for fairness
         int gap = rng.nextInt(COLS);
-        board[ROWS - 1] = new int[COLS];
-        for (int c = 0; c < COLS; c++) if (c != gap) board[ROWS - 1][c] = 8;
+        for (int r = ROWS - rows; r < ROWS; r++) {
+            board[r] = new int[COLS];
+            for (int c = 0; c < COLS; c++) if (c != gap) board[r][c] = 8;
+        }
         // Shift active piece up to match
-        pr--;
-        triggerShake(5f);
+        pr -= rows;
+        triggerShake(5f + rows);
         vibrate(30);
         postInvalidate();
     }
@@ -412,7 +402,7 @@ public class TetrisView extends View {
         System.arraycopy(nextQueue, 1, nextQueue, 0, 3);
         nextQueue[3] = rng.nextInt(7) + 1;
         shape = copy(BASE[type]);
-        pr = 0; pc = COLS / 2 - 2;
+        pr = 0; pc = COLS / 2 - 2; iState = 0;
         canHold = true; onFloor = false; lockResetCount = 0;
         handler.removeCallbacks(lockDelay);
         if (!valid(shape, pr, pc)) {
@@ -480,9 +470,28 @@ public class TetrisView extends View {
         pc++; postInvalidate(); resetLockDelay(); vibrate(10);
     }
 
-    void rotate() {
+    void rotate(boolean cw) {
         if (state != State.PLAYING || clearingRows != null) return;
-        int[][] r = rotateCW(shape);
+        int[][] r = cw ? rotateCW(shape) : rotateCCW(shape);
+
+        if (type == 1) {
+            // I-piece: SRS rotation center is at the gridline intersection
+            // between the middle two rows/cols of the 4×4 bounding box.
+            int[] corr  = cw ? I_CORR_CW[iState]   : I_CORR_CCW[iState];
+            int[][] kix = cw ? I_KICKS_CW[iState]   : I_KICKS_CCW[iState];
+            int bpr = pr + corr[0], bpc = pc + corr[1];
+            for (int[] k : kix) {
+                if (valid(r, bpr + k[0], bpc + k[1])) {
+                    shape = r; pr = bpr + k[0]; pc = bpc + k[1];
+                    iState = cw ? (iState + 1) % 4 : (iState + 3) % 4;
+                    postInvalidate(); resetLockDelay(); vibrate(12);
+                    return;
+                }
+            }
+            return;
+        }
+
+        // All other pieces: standard kicks
         int[][] kicks = {{0,0},{0,1},{0,-1},{-1,0},{-1,1},{-1,-1},{0,2},{0,-2},{-2,0},{-1,2},{-1,-2}};
         for (int[] k : kicks) {
             if (valid(r, pr + k[0], pc + k[1])) {
@@ -532,7 +541,7 @@ public class TetrisView extends View {
         if (prev == 0) { spawnPiece(); canHold = false; }
         else {
             type = prev; shape = copy(BASE[type]);
-            pr = 0; pc = COLS / 2 - 2;
+            pr = 0; pc = COLS / 2 - 2; iState = 0;
             onFloor = false; lockResetCount = 0;
             handler.removeCallbacks(lockDelay);
             if (!valid(shape, pr, pc)) {
@@ -612,6 +621,15 @@ public class TetrisView extends View {
         return r;
     }
 
+    int[][] rotateCCW(int[][] cells) {
+        int[][] r = new int[cells.length][2];
+        for (int i = 0; i < cells.length; i++) { r[i][0] = -cells[i][1]; r[i][1] = cells[i][0]; }
+        int minR = Integer.MAX_VALUE, minC = Integer.MAX_VALUE;
+        for (int[] c : r) { minR = Math.min(minR, c[0]); minC = Math.min(minC, c[1]); }
+        for (int[] c : r) { c[0] -= minR; c[1] -= minC; }
+        return r;
+    }
+
     int[][] copy(int[][] src) {
         int[][] o = new int[src.length][2];
         for (int i = 0; i < src.length; i++) o[i] = src[i].clone();
@@ -621,44 +639,64 @@ public class TetrisView extends View {
     int[] palette() {
         if (colorTheme == 1) return COLORS_GRAY;
         if (colorTheme == 2) return COLORS_GAMEBOY;
+        if (colorTheme == 3) return COLORS_ASCII;
         return highContrast ? COLORS_HC : COLORS;
     }
 
-    String fontName() { return monoFont ? "monospace" : "sans-serif"; }
+    String fontName() { return (monoFont || colorTheme == 3) ? "monospace" : "sans-serif"; }
 
     int withAlpha(int color, int alpha) { return (alpha << 24) | (color & 0x00FFFFFF); }
 
     void applyTheme() {
-        if (colorTheme == 1) {  // Grayscale — true black BG saves OLED power
-            BG         = 0xFF000000;
-            BG_BOARD   = 0xFF0F0F0F;
-            BG_CARD    = 0xFF181818;
-            BORDER     = 0xFF303030;
-            ACCENT     = 0xFFBBBBBB;
-            ACCENT_DIM = 0xFF282828;
-            TXT_BRIGHT = 0xFFEEEEEE;
-            TXT_MID    = 0xFF888888;
-            TXT_DIM    = 0xFF444444;
-        } else if (colorTheme == 2) {  // Game Boy
-            BG         = 0xFF0F380F;
-            BG_BOARD   = 0xFF0A2A0A;
-            BG_CARD    = 0xFF143814;
-            BORDER     = 0xFF1E4A1E;
-            ACCENT     = 0xFF6B8C10;
-            ACCENT_DIM = 0xFF1A3A1A;
-            TXT_BRIGHT = 0xFF6B8C10;
-            TXT_MID    = 0xFF4E6E10;
-            TXT_DIM    = 0xFF2E5018;
-        } else {                // Default
-            BG         = 0xFF06060F;
-            BG_BOARD   = 0xFF0B0B18;
-            BG_CARD    = 0xFF0F0F1E;
-            BORDER     = 0xFF1A1A2C;
-            ACCENT     = 0xFF7B6CF6;
-            ACCENT_DIM = 0xFF2E2A5A;
-            TXT_BRIGHT = 0xFFEEEEFF;
-            TXT_MID    = 0xFF8888AA;
-            TXT_DIM    = 0xFF3A3A55;
+        switch (colorTheme) {
+            case 1:  // Grayscale — true black BG saves OLED power
+                BG         = 0xFF000000;
+                BG_BOARD   = 0xFF1A1A1A;
+                BG_CARD    = 0xFF181818;
+                BORDER     = 0xFF303030;
+                ACCENT     = 0xFFBBBBBB;
+                ACCENT_DIM = 0xFF282828;
+                ON_ACCENT  = 0xFF000000;  // black text on grey button
+                TXT_BRIGHT = 0xFFEEEEEE;
+                TXT_MID    = 0xFF888888;
+                TXT_DIM    = 0xFF444444;
+                break;
+            case 2:  // Game Boy — muted sage, board clearly distinct
+                BG         = 0xFF7A8C62;
+                BG_BOARD   = 0xFF9BAA7A;
+                BG_CARD    = 0xFF7A8C62;
+                BORDER     = 0xFF3D5230;
+                ACCENT     = 0xFF1E3018;
+                ACCENT_DIM = 0xFF4A6038;
+                ON_ACCENT  = 0xFF9BAA7A;  // light sage text on dark button
+                TXT_BRIGHT = 0xFF1E3018;
+                TXT_MID    = 0xFF3D5230;
+                TXT_DIM    = 0xFF4A6038;
+                break;
+            case 3:  // ASCII Terminal — white on black
+                BG         = 0xFF000000;
+                BG_BOARD   = 0xFF000000;
+                BG_CARD    = 0xFF0A0A0A;
+                BORDER     = 0xFF555555;
+                ACCENT     = 0xFFFFFFFF;
+                ACCENT_DIM = 0xFF222222;
+                ON_ACCENT  = 0xFF000000;  // black text on white button
+                TXT_BRIGHT = 0xFFFFFFFF;
+                TXT_MID    = 0xFFAAAAAA;
+                TXT_DIM    = 0xFF555555;
+                break;
+            default:  // 0 = Default
+                BG         = 0xFF06060F;
+                BG_BOARD   = 0xFF18182E;
+                BG_CARD    = 0xFF0F0F1E;
+                BORDER     = 0xFF1A1A2C;
+                ACCENT     = 0xFF7B6CF6;
+                ACCENT_DIM = 0xFF2E2A5A;
+                ON_ACCENT  = 0xFFFFFFFF;  // white text on purple button
+                TXT_BRIGHT = 0xFFEEEEFF;
+                TXT_MID    = 0xFF8888AA;
+                TXT_DIM    = 0xFF3A3A55;
+                break;
         }
         setBackgroundColor(BG);
         postInvalidate();
@@ -673,24 +711,24 @@ public class TetrisView extends View {
         if (shaking) { canvas.save(); canvas.translate(shakeX, shakeY); }
 
         if (state == State.MENU) {
-            drawMenuScreen(canvas);
-            if (showStatsOverlay) drawStatsOverlay(canvas);
+            renderer.drawMenuScreen(canvas);
+            if (showStatsOverlay) renderer.drawStatsOverlay(canvas);
         } else {
-            drawBoardContainer(canvas);
-            drawBoard(canvas);
+            renderer.drawBoardContainer(canvas);
+            renderer.drawBoard(canvas);
             if (clearingRows == null && state != State.GAME_OVER) {
-                if (showGhost) drawGhost(canvas);
-                drawPiece(canvas);
+                if (showGhost) renderer.drawGhost(canvas);
+                renderer.drawPiece(canvas);
             }
-            if (showGrid) drawGrid(canvas);
-            drawInfoBar(canvas);
-            drawHoldPanel(canvas);
-            drawNextPanel(canvas);
-            drawGarbageIndicator(canvas);
+            if (showGrid) renderer.drawGrid(canvas);
+            renderer.drawInfoBar(canvas);
+            renderer.drawHoldPanel(canvas);
+            renderer.drawNextPanel(canvas);
+            renderer.drawGarbageIndicator(canvas);
 
             // Level up flash
             if (levelUpActive && levelUpAlpha > 0 && !reducedMotion) {
-                fill.setColor(Color.argb(levelUpAlpha / 4, 123, 108, 246));
+                fill.setColor(withAlpha(ACCENT, levelUpAlpha / 4));
                 canvas.drawRect(0, 0, screenW, screenH, fill);
                 txt.setTextSize(cell * 1.1f);
                 txt.setColor(Color.argb(levelUpAlpha, 255, 255, 255));
@@ -700,713 +738,14 @@ public class TetrisView extends View {
                 txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
             }
 
-            if      (state == State.GAME_OVER) drawGameOverScreen(canvas);
-            else if (state == State.PAUSED)    drawPauseOverlay(canvas);
-            else if (state == State.COUNTDOWN) drawCountdownOverlay(canvas);
+            if      (state == State.GAME_OVER) renderer.drawGameOverScreen(canvas);
+            else if (state == State.PAUSED)    renderer.drawPauseOverlay(canvas);
+            else if (state == State.COUNTDOWN) renderer.drawCountdownOverlay(canvas);
         }
 
-        if (settingsAnim > 0) drawSettingsPanel(canvas);
+        if (settingsAnim > 0) renderer.drawSettingsPanel(canvas);
 
         if (shaking) canvas.restore();
-    }
-
-    // ── Board Container ────────────────────────────────────────────
-    void drawBoardContainer(Canvas canvas) {
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(BG_BOARD);
-        canvas.drawRoundRect(bLeft - 2, bTop - 2,
-            bLeft + COLS * cell + 2, bTop + ROWS * cell + 2,
-            cardR * 0.4f, cardR * 0.4f, fill);
-    }
-
-    // ── Garbage Indicator ──────────────────────────────────────────
-    void drawGarbageIndicator(Canvas canvas) {
-        if (selectedMode != 2 || state != State.PLAYING) return;
-        long now = System.currentTimeMillis();
-        float prog = nextGarbageAt > 0
-            ? Math.max(0f, Math.min(1f, (float)(nextGarbageAt - now) / garbageInterval()))
-            : 1f;
-        // prog = 1.0 right after garbage sent, 0.0 when about to arrive
-        float barX = bLeft - 7f;
-        float barW = 4.5f;
-        float barH = ROWS * cell;
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(0x22FF2222);
-        canvas.drawRect(barX, bTop, barX + barW, bTop + barH, fill);
-        float fillH = barH * (1f - prog);
-        int alpha = prog < 0.25f ? 0xFF : 0xAA;
-        fill.setColor(Color.argb(alpha, 0xFF, 0x33, 0x22));
-        canvas.drawRect(barX, bTop + barH - fillH, barX + barW, bTop + barH, fill);
-        // pulse label when imminent
-        if (prog < 0.15f) {
-            txt.setTextAlign(Paint.Align.LEFT);
-            txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-            txt.setTextSize(cell * 0.24f);
-            txt.setColor(Color.argb((int)((0.15f - prog) / 0.15f * 200), 0xFF, 0x44, 0x33));
-            canvas.drawText("!", barX - cell * 0.1f, bTop + barH * 0.5f, txt);
-            txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-        }
-    }
-
-    // ── Info Bar ───────────────────────────────────────────────────
-    void drawInfoBar(Canvas canvas) {
-        float barH = bTop;
-
-        // Background card
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(BG_CARD);
-        canvas.drawRect(0, 0, screenW, barH, fill);
-        // Bottom separator line
-        fill.setColor(BORDER);
-        canvas.drawRect(0, barH - 1.5f, screenW, barH, fill);
-
-        String[] labels = {"SCORE", "LEVEL", "LINES"};
-        String[] values = {fmtScore(score), String.valueOf(level), String.valueOf(totalLines)};
-        float sw = screenW / 3f;
-
-        for (int i = 0; i < 3; i++) {
-            float cx = sw * i + sw / 2f;
-            // Divider between columns
-            if (i > 0) {
-                fill.setColor(BORDER);
-                canvas.drawRect(sw * i - 0.75f, barH * 0.15f, sw * i + 0.75f, barH * 0.85f, fill);
-            }
-            txt.setTextAlign(Paint.Align.CENTER);
-            txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-            txt.setTextSize(barH * 0.28f);
-            txt.setColor(TXT_MID);
-            canvas.drawText(labels[i], cx, barH * 0.32f, txt);
-            txt.setTextSize(barH * 0.50f);
-            txt.setColor(i == 0 ? ACCENT : TXT_BRIGHT);
-            txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-            canvas.drawText(values[i], cx, barH * 0.84f, txt);
-        }
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-
-        // Pause button — manually drawn, no emoji (avoids colored-emoji rendering)
-        if (state == State.PLAYING || state == State.PAUSED) {
-            float bcx = screenW - barH * 0.46f;
-            float bcy = barH * 0.50f;
-            float br  = barH * 0.22f;
-            fill.setStyle(Paint.Style.FILL);
-            fill.setColor(0x28FFFFFF);
-            canvas.drawCircle(bcx, bcy, br * 1.5f, fill);
-            fill.setColor(TXT_MID);
-            if (state == State.PAUSED) {
-                // Triangle (play)
-                float ts = br * 0.75f;
-                Path tri = new Path();
-                tri.moveTo(bcx - ts * 0.55f, bcy - ts);
-                tri.lineTo(bcx - ts * 0.55f, bcy + ts);
-                tri.lineTo(bcx + ts * 0.9f, bcy);
-                tri.close();
-                canvas.drawPath(tri, fill);
-            } else {
-                // Two bars (pause)
-                float bw = br * 0.30f, bh = br * 0.85f, bg = br * 0.25f;
-                canvas.drawRect(bcx - bg - bw, bcy - bh, bcx - bg, bcy + bh, fill);
-                canvas.drawRect(bcx + bg,      bcy - bh, bcx + bg + bw, bcy + bh, fill);
-            }
-        }
-    }
-
-    // ── Hold Panel ─────────────────────────────────────────────────
-    void drawHoldPanel(Canvas canvas) {
-        float fH  = screenH - footerTop;
-        if (fH < 4) return;
-        float pW  = screenW * 0.26f;
-        float pX  = screenW * 0.01f;
-        float pY  = footerTop + fH * 0.06f;
-        float pH  = fH * 0.88f;
-        drawCard(canvas, pX, pY, pW, pH, canHold ? ACCENT_DIM : BORDER);
-
-        float lH = pH * 0.32f;
-        txt.setTextSize(lH * 0.52f);
-        txt.setColor(canHold ? TXT_MID : TXT_DIM);
-        txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-        canvas.drawText("HOLD", pX + pW / 2f, pY + lH * 0.72f, txt);
-        if (holdType != 0) {
-            float cs = Math.min(pW / 5.5f, (pH - lH) / 2.3f);
-            drawMini(canvas, holdType, pX + pW / 2f, pY + lH + (pH - lH) * 0.55f, cs, canHold);
-        }
-    }
-
-    // ── Next Panel ─────────────────────────────────────────────────
-    void drawNextPanel(Canvas canvas) {
-        float fH  = screenH - footerTop;
-        if (fH < 4) return;
-        float pX  = screenW * 0.29f;
-        float pW  = screenW * 0.70f;
-        float pY  = footerTop + fH * 0.06f;
-        float pH  = fH * 0.88f;
-        drawCard(canvas, pX, pY, pW, pH, BORDER);
-
-        float lH = pH * 0.32f;
-        txt.setTextSize(lH * 0.52f);
-        txt.setColor(TXT_MID);
-        txt.setTextAlign(Paint.Align.LEFT);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-        canvas.drawText("NEXT", pX + pW * 0.05f, pY + lH * 0.72f, txt);
-
-        float slotW = pW / 4f;
-        float cs    = Math.min(slotW / 5.5f, (pH - lH) / 2.3f);
-        float cy    = pY + lH + (pH - lH) * 0.55f;
-        for (int i = 0; i < 4; i++)
-            drawMini(canvas, nextQueue[i], pX + slotW * i + slotW / 2f, cy, cs, true);
-        txt.setTextAlign(Paint.Align.CENTER);
-    }
-
-    void drawCard(Canvas canvas, float x, float y, float w, float h, int borderColor) {
-        float r = cardR * 0.6f;
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(BG_CARD);
-        canvas.drawRoundRect(x, y, x + w, y + h, r, r, fill);
-        fill.setStyle(Paint.Style.STROKE);
-        fill.setStrokeWidth(1f);
-        fill.setColor(borderColor);
-        canvas.drawRoundRect(x, y, x + w, y + h, r, r, fill);
-        fill.setStyle(Paint.Style.FILL);
-    }
-
-    void drawMini(Canvas canvas, int t, float cx, float cy, float cs, boolean bright) {
-        if (t == 0) return;
-        int[][] s = BASE[t];
-        int maxC = 0, maxR = 0;
-        for (int[] b : s) { maxC = Math.max(maxC, b[1]); maxR = Math.max(maxR, b[0]); }
-        float ox = cx - cs * (maxC + 1) / 2f;
-        float oy = cy - cs * (maxR + 1) / 2f;
-        float g = Math.max(1f, cs * 0.06f);
-        int[] pal = palette();
-        int col = bright ? pal[t] : ((pal[t] & 0x00FFFFFF) | 0x44000000);
-        for (int[] b : s) {
-            float px = ox + b[1] * cs, py = oy + b[0] * cs;
-            fill.setStyle(Paint.Style.FILL);
-            fill.setColor(col);
-            canvas.drawRect(px+g, py+g, px+cs-g, py+cs-g, fill);
-            if (bright) {
-                fill.setColor(0x30FFFFFF);
-                canvas.drawRect(px+g, py+g, px+cs-g, py+g+2f, fill);
-                canvas.drawRect(px+g, py+g, px+g+2f, py+cs-g, fill);
-            }
-        }
-    }
-
-    // ── Board ──────────────────────────────────────────────────────
-    void drawBoard(Canvas canvas) {
-        int[] pal = palette();
-        for (int r = 0; r < ROWS; r++) {
-            if (isFlashRow(r)) {
-                fill.setStyle(Paint.Style.FILL);
-                fill.setColor(0xFFFFFFFF);
-                float g = Math.max(1.5f, cell * 0.04f);
-                for (int c = 0; c < COLS; c++) {
-                    float x = bLeft + c*cell, y = bTop + r*cell;
-                    canvas.drawRect(x+g, y+g, x+cell-g, y+cell-g, fill);
-                }
-            } else {
-                for (int c = 0; c < COLS; c++)
-                    drawCell(canvas, bLeft+c*cell, bTop+r*cell, cell, board[r][c], pal, false);
-            }
-        }
-        if (lockedCells != null && clearingRows == null) {
-            fill.setStyle(Paint.Style.FILL);
-            fill.setColor(0xBBFFFFFF);
-            float g = Math.max(1.5f, cell * 0.04f);
-            for (int[] rc : lockedCells) {
-                if (rc[0] >= 0 && rc[0] < ROWS) {
-                    float x = bLeft+rc[1]*cell, y = bTop+rc[0]*cell;
-                    canvas.drawRect(x+g, y+g, x+cell-g, y+cell-g, fill);
-                }
-            }
-        }
-    }
-
-    boolean isFlashRow(int r) {
-        if (clearingRows == null) return false;
-        for (int cr : clearingRows) if (cr == r) return true;
-        return false;
-    }
-
-    void drawCell(Canvas canvas, float x, float y, float cs, int t, int[] pal, boolean active) {
-        fill.setStyle(Paint.Style.FILL);
-        if (t == 0) { fill.setColor(BG_BOARD); canvas.drawRect(x, y, x+cs, y+cs, fill); return; }
-        float g = Math.max(1.5f, cs * 0.045f);
-        int col = pal[t];
-        // Base fill — sharp corners
-        fill.setColor(col);
-        canvas.drawRect(x+g, y+g, x+cs-g, y+cs-g, fill);
-        // Thin top-left bright edge
-        fill.setColor(active ? 0x50FFFFFF : 0x28FFFFFF);
-        canvas.drawRect(x+g, y+g, x+cs-g, y+g+2f, fill);
-        canvas.drawRect(x+g, y+g, x+g+2f, y+cs-g, fill);
-        // Thin bottom-right dark edge
-        fill.setColor(0x40000000);
-        canvas.drawRect(x+g, y+cs-g-2f, x+cs-g, y+cs-g, fill);
-        canvas.drawRect(x+cs-g-2f, y+g, x+cs-g, y+cs-g, fill);
-    }
-
-    void drawGhost(Canvas canvas) {
-        if (shape == null) return;
-        int gr = ghostRow();
-        if (gr == pr) return;
-        fill.setStyle(Paint.Style.STROKE);
-        fill.setStrokeWidth(1.5f);
-        fill.setColor(0x55FFFFFF);
-        float g = Math.max(2f, cell * 0.05f);
-        for (int[] b : shape) {
-            int rr = gr+b[0], c = pc+b[1];
-            if (rr < 0) continue;
-            float x = bLeft+c*cell, y = bTop+rr*cell;
-            canvas.drawRect(x+g, y+g, x+cell-g, y+cell-g, fill);
-        }
-        fill.setStyle(Paint.Style.FILL);
-    }
-
-    void drawPiece(Canvas canvas) {
-        if (shape == null) return;
-        int[] pal = palette();
-        for (int[] b : shape) {
-            int r = pr+b[0], c = pc+b[1];
-            if (r >= 0) drawCell(canvas, bLeft+c*cell, bTop+r*cell, cell, type, pal, true);
-        }
-    }
-
-    void drawGrid(Canvas canvas) {
-        fill.setStyle(Paint.Style.STROKE);
-        fill.setStrokeWidth(0.6f);
-        fill.setColor(0xFF111122);
-        float right = bLeft+COLS*cell, bottom = bTop+ROWS*cell;
-        for (int r = 0; r <= ROWS; r++) canvas.drawLine(bLeft, bTop+r*cell, right, bTop+r*cell, fill);
-        for (int c = 0; c <= COLS; c++) canvas.drawLine(bLeft+c*cell, bTop, bLeft+c*cell, bottom, fill);
-        fill.setColor(ACCENT_DIM); fill.setStrokeWidth(1.5f);
-        canvas.drawRect(bLeft, bTop, right, bottom, fill);
-        fill.setStyle(Paint.Style.FILL);
-    }
-
-    void drawLockBar(Canvas canvas) {
-        if (shape == null) return;
-        int bottomRow = pr;
-        for (int[] b : shape) bottomRow = Math.max(bottomRow, pr + b[0]);
-        float y  = bTop + (bottomRow + 1) * cell - 4f;
-        float x0 = bLeft, x1 = bLeft + COLS * cell;
-        long elapsed = System.currentTimeMillis() - lockDelayStart;
-        float prog = 1f - Math.min(1f, (float) elapsed / lockDelayDuration);
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(0x22FFFFFF);
-        canvas.drawRect(x0, y, x1, y + 3.5f, fill);
-        fill.setColor(ACCENT);
-        canvas.drawRect(x0, y, x0 + (x1 - x0) * prog, y + 3.5f, fill);
-    }
-
-    // ── Menu Screen ────────────────────────────────────────────────
-    void drawMenuScreen(Canvas canvas) {
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(BG);
-        canvas.drawRect(0, 0, screenW, screenH, fill);
-
-        float cx = screenW / 2f;
-
-        // Title
-        txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-        txt.setTextSize(cell * 2.3f);
-        txt.setColor(TXT_BRIGHT);
-        canvas.drawText("TETRIS", cx, screenH * 0.19f, txt);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-        txt.setTextSize(cell * 0.36f);
-        txt.setColor(TXT_DIM);
-        canvas.drawText("v1.0", cx, screenH * 0.245f, txt);
-
-        // High score
-        if (highScore > 0) {
-            txt.setTextSize(cell * 0.26f);
-            txt.setColor(TXT_DIM);
-            canvas.drawText("BEST", cx, screenH * 0.295f, txt);
-            txt.setTextSize(cell * 0.52f);
-            txt.setColor(ACCENT);
-            txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-            canvas.drawText(fmtScore(highScore), cx, screenH * 0.340f, txt);
-            txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-        }
-
-        // Mode selector
-        float modeTop = screenH * 0.40f;
-        txt.setTextSize(cell * 0.30f);
-        txt.setColor(TXT_DIM);
-        canvas.drawText("SELECT MODE", cx, modeTop - cell * 0.3f, txt);
-
-        String[] modeLabels = {"CLASSIC", "FIXED SPEED", "GARBAGE"};
-        boolean[] modeAvail = {true, true, true};
-        modeZones = new RectF[3];
-        float mW = screenW * 0.27f, mH = cell * 0.85f;
-        float spacing = (screenW - mW * 3) / 4f;
-        for (int i = 0; i < 3; i++) {
-            float mx = spacing + (mW + spacing) * i;
-            float my = modeTop;
-            modeZones[i] = new RectF(mx, my, mx + mW, my + mH);
-            boolean sel = selectedMode == i;
-            fill.setStyle(Paint.Style.FILL);
-            fill.setColor(sel ? ACCENT : (modeAvail[i] ? ACCENT_DIM : 0xFF0D0D18));
-            canvas.drawRoundRect(modeZones[i], cardR * 0.5f, cardR * 0.5f, fill);
-            if (!sel) {
-                fill.setStyle(Paint.Style.STROKE);
-                fill.setStrokeWidth(1f);
-                fill.setColor(modeAvail[i] ? ACCENT_DIM : BORDER);
-                canvas.drawRoundRect(modeZones[i], cardR * 0.5f, cardR * 0.5f, fill);
-                fill.setStyle(Paint.Style.FILL);
-            }
-            txt.setTextSize(cell * 0.34f);
-            txt.setColor(sel ? 0xFFFFFFFF : (modeAvail[i] ? TXT_MID : TXT_DIM));
-            txt.setTypeface(sel ? Typeface.create(fontName(), Typeface.BOLD)
-                                : Typeface.create(fontName(), Typeface.NORMAL));
-            canvas.drawText(modeLabels[i], mx + mW / 2f, my + mH * 0.67f, txt);
-            txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-            if (!modeAvail[i]) {
-                txt.setTextSize(cell * 0.22f);
-                txt.setColor(TXT_DIM);
-                canvas.drawText("SOON", mx + mW / 2f, my + mH * 0.90f, txt);
-            }
-        }
-
-        // Speed selector (fixed mode only)
-        float speedTop = modeTop + mH + cell * 0.5f;
-        if (selectedMode == 1) {
-            speedZones = new RectF[4];
-            txt.setTextSize(cell * 0.28f);
-            txt.setColor(TXT_DIM);
-            canvas.drawText("SPEED", cx, speedTop - cell * 0.15f, txt);
-            float sW = screenW * 0.17f, sH = cell * 0.70f;
-            float sSpacing = (screenW - sW * 4) / 5f;
-            for (int i = 0; i < 4; i++) {
-                float sx = sSpacing + (sW + sSpacing) * i;
-                float sy = speedTop + cell * 0.05f;
-                speedZones[i] = new RectF(sx, sy, sx + sW, sy + sH);
-                boolean sel = fixedSpeedIdx == i;
-                fill.setStyle(Paint.Style.FILL);
-                fill.setColor(sel ? ACCENT : ACCENT_DIM);
-                canvas.drawRoundRect(speedZones[i], cardR * 0.4f, cardR * 0.4f, fill);
-                txt.setTextSize(cell * 0.30f);
-                txt.setColor(sel ? 0xFFFFFFFF : TXT_MID);
-                txt.setTypeface(sel ? Typeface.create(fontName(), Typeface.BOLD)
-                                    : Typeface.create(fontName(), Typeface.NORMAL));
-                canvas.drawText(FIXED_LABELS[i], sx + sW / 2f, sy + sH * 0.68f, txt);
-                txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-            }
-        } else {
-            speedZones = null;
-        }
-
-        // PLAY button
-        float playY = screenH * 0.64f;
-        float playW = screenW * 0.52f, playH = cell * 1.15f;
-        playZone = new RectF(cx - playW/2f, playY, cx + playW/2f, playY + playH);
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(ACCENT);
-        canvas.drawRoundRect(playZone, cardR * 0.7f, cardR * 0.7f, fill);
-        fill.setColor(0x22FFFFFF);
-        canvas.drawRoundRect(playZone.left, playZone.top, playZone.right,
-            playZone.top + playH * 0.45f, cardR * 0.7f, cardR * 0.7f, fill);
-        txt.setTextSize(cell * 0.58f);
-        txt.setColor(0xFFFFFFFF);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-        canvas.drawText("PLAY", cx, playY + playH * 0.68f, txt);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-
-        // Stats + Settings buttons side by side
-        float btnY  = screenH * 0.78f;
-        float btnH  = cell * 0.88f;
-        float btnW  = screenW * 0.40f;
-        float gap   = screenW * 0.04f;
-        float totalW = btnW * 2 + gap;
-        float startX = cx - totalW / 2f;
-
-        statsZone = new RectF(startX, btnY, startX + btnW, btnY + btnH);
-        drawCard(canvas, statsZone.left, statsZone.top, statsZone.width(), statsZone.height(), BORDER);
-        txt.setTextSize(cell * 0.38f);
-        txt.setColor(TXT_MID);
-        canvas.drawText("STATS", statsZone.centerX(), btnY + btnH * 0.67f, txt);
-
-        float sX = startX + btnW + gap;
-        menuSettingsZone = new RectF(sX, btnY, sX + btnW, btnY + btnH);
-        drawCard(canvas, menuSettingsZone.left, menuSettingsZone.top, menuSettingsZone.width(), menuSettingsZone.height(), BORDER);
-        txt.setTextSize(cell * 0.38f);
-        txt.setColor(TXT_MID);
-        canvas.drawText("\u2699  SETTINGS", menuSettingsZone.centerX(), btnY + btnH * 0.67f, txt);
-
-    }
-
-    RectF pauseSettingsZone;
-
-    // ── Pause Overlay ──────────────────────────────────────────────
-    void drawPauseOverlay(Canvas canvas) {
-        float right = bLeft + COLS * cell, bottom = bTop + ROWS * cell;
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(withAlpha(BG, 0xEE));
-        canvas.drawRect(bLeft, bTop, right, bottom, fill);
-        float cx = (bLeft + right) / 2f, cy = (bTop + bottom) / 2f;
-
-        txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-        txt.setTextSize(cell * 1.1f);
-        txt.setColor(TXT_BRIGHT);
-        canvas.drawText("PAUSED", cx, cy - cell * 1.5f, txt);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-
-        // Score summary
-        txt.setTextSize(cell * 0.38f);
-        txt.setColor(TXT_MID);
-        canvas.drawText("SCORE  " + fmtScore(score) + "   LVL  " + level, cx, cy - cell * 0.8f, txt);
-
-        // Tap to resume hint
-        txt.setTextSize(cell * 0.32f);
-        txt.setColor(TXT_DIM);
-        canvas.drawText("tap anywhere to resume", cx, cy - cell * 0.38f, txt);
-
-        float bW = cell * 4.0f, bH = cell * 0.78f;
-        float gap = cell * 0.32f;
-        float totalH = bH * 3 + gap * 2;
-        float bT = cy + cell * 0.25f;
-        float bL = cx - bW / 2f;
-
-        // RESTART
-        restartZone = new RectF(bL, bT, bL + bW, bT + bH);
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(ACCENT);
-        canvas.drawRect(restartZone, fill);
-        txt.setTextSize(cell * 0.38f);
-        txt.setColor(0xFFFFFFFF);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-        canvas.drawText("RESTART", cx, bT + bH * 0.67f, txt);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-
-        // SETTINGS
-        float sT = bT + bH + gap;
-        pauseSettingsZone = new RectF(bL, sT, bL + bW, sT + bH);
-        drawCard(canvas, bL, sT, bW, bH, BORDER);
-        txt.setTextSize(cell * 0.38f);
-        txt.setColor(TXT_MID);
-        canvas.drawText("\u2699  SETTINGS", cx, sT + bH * 0.67f, txt);
-
-        // MAIN MENU
-        float mT = sT + bH + gap;
-        menuZone = new RectF(bL, mT, bL + bW, mT + bH);
-        drawCard(canvas, bL, mT, bW, bH, BORDER);
-        txt.setTextSize(cell * 0.38f);
-        txt.setColor(TXT_MID);
-        canvas.drawText("MAIN MENU", cx, mT + bH * 0.67f, txt);
-    }
-
-    // ── Game Over Screen ───────────────────────────────────────────
-    void drawGameOverScreen(Canvas canvas) {
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(withAlpha(BG, 0xF2));
-        canvas.drawRect(0, 0, screenW, screenH, fill);
-        float cx = screenW / 2f;
-
-        txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-        txt.setTextSize(cell * 1.5f);
-        txt.setColor(TXT_BRIGHT);
-        canvas.drawText("GAME OVER", cx, screenH * 0.18f, txt);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-
-        // Stats card
-        float cX = screenW * 0.09f, cW = screenW * 0.82f;
-        float cY = screenH * 0.24f, cH = screenH * 0.40f;
-        drawCard(canvas, cX, cY, cW, cH, BORDER);
-
-        String[] labels = {"SCORE", "LEVEL", "LINES", "TIME"};
-        String[] values = {String.format("%,d", gameOverDisplay),
-            String.valueOf(level), String.valueOf(totalLines), fmtTime(timeSurvived)};
-        float rowH = cH / 4f;
-        for (int i = 0; i < 4; i++) {
-            float ry = cY + rowH * i + rowH * 0.62f;
-            txt.setTextSize(cell * 0.33f);
-            txt.setColor(TXT_DIM);
-            txt.setTextAlign(Paint.Align.LEFT);
-            canvas.drawText(labels[i], cX + cW * 0.08f, ry, txt);
-            txt.setTextSize(cell * 0.46f);
-            txt.setColor(i == 0 ? ACCENT : TXT_BRIGHT);
-            txt.setTypeface(i == 0 ? Typeface.create(fontName(), Typeface.BOLD)
-                                   : Typeface.create(fontName(), Typeface.NORMAL));
-            txt.setTextAlign(Paint.Align.RIGHT);
-            canvas.drawText(values[i], cX + cW * 0.92f, ry, txt);
-            txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-            // "NEW BEST" badge on score row
-            if (i == 0 && newHighScore) {
-                float bW = cell * 2.0f, bH = cell * 0.38f;
-                float bX = cX + cW * 0.08f, bY = ry - rowH * 0.52f;
-                fill.setColor(ACCENT);
-                canvas.drawRoundRect(bX, bY, bX + bW, bY + bH, bH/2f, bH/2f, fill);
-                txt.setTextSize(cell * 0.22f);
-                txt.setColor(0xFFFFFFFF);
-                txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-                txt.setTextAlign(Paint.Align.CENTER);
-                canvas.drawText("NEW BEST", bX + bW/2f, bY + bH * 0.72f, txt);
-                txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-            }
-            if (i < 3) {
-                fill.setStyle(Paint.Style.FILL);
-                fill.setColor(BORDER);
-                canvas.drawRect(cX + cW*0.06f, cY + rowH*(i+1),
-                    cX + cW*0.94f, cY + rowH*(i+1) + 1f, fill);
-            }
-        }
-
-        float btnY = screenH * 0.67f;
-        float btnW = screenW * 0.37f, btnH = cell * 0.95f;
-        float gap  = screenW * 0.05f;
-        restartZone = new RectF(cx - gap/2f - btnW, btnY, cx - gap/2f, btnY + btnH);
-        menuZone    = new RectF(cx + gap/2f, btnY, cx + gap/2f + btnW, btnY + btnH);
-
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(ACCENT);
-        canvas.drawRoundRect(restartZone, cardR * 0.5f, cardR * 0.5f, fill);
-        txt.setTextSize(cell * 0.40f);
-        txt.setColor(0xFFFFFFFF);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-        txt.setTextAlign(Paint.Align.CENTER);
-        canvas.drawText("RESTART", restartZone.centerX(), btnY + btnH * 0.67f, txt);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-
-        drawCard(canvas, menuZone.left, menuZone.top, menuZone.width(), menuZone.height(), BORDER);
-        txt.setTextSize(cell * 0.40f);
-        txt.setColor(TXT_MID);
-        canvas.drawText("MENU", menuZone.centerX(), btnY + btnH * 0.67f, txt);
-    }
-
-    // ── Countdown Overlay ──────────────────────────────────────────
-    void drawCountdownOverlay(Canvas canvas) {
-        float right = bLeft + COLS*cell, bottom = bTop + ROWS*cell;
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(withAlpha(BG, 0xCC));
-        canvas.drawRect(bLeft, bTop, right, bottom, fill);
-        float cx = (bLeft + right) / 2f, cy = (bTop + bottom) / 2f;
-        txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-        txt.setTextSize(cell * 0.44f);
-        txt.setColor(TXT_DIM);
-        canvas.drawText("get ready", cx, cy - cell * 1.6f, txt);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-        txt.setTextSize(cell * 4.2f);
-        txt.setColor(ACCENT);
-        canvas.drawText(String.valueOf(countdown), cx, cy + cell * 1.6f, txt);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-    }
-
-    // ── Settings Panel ─────────────────────────────────────────────
-    void drawSettingsPanel(Canvas canvas) {
-        float pW = screenW * 0.78f;
-        float px = screenW - pW * settingsAnim;
-
-        float panelTop = (state == State.MENU) ? 0 : bTop;
-
-        // dim left area
-        int dimA = (int)(settingsAnim * 160);
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(Color.argb(dimA, 0, 0, 8));
-        canvas.drawRect(0, panelTop, px, screenH, fill);
-
-        // panel bg
-        fill.setColor(0xFF0B0B1A);
-        canvas.drawRect(px, panelTop, screenW, screenH, fill);
-        fill.setStyle(Paint.Style.STROKE);
-        fill.setStrokeWidth(1f);
-        fill.setColor(BORDER);
-        canvas.drawLine(px, panelTop, px, screenH, fill);
-        fill.setStyle(Paint.Style.FILL);
-
-        float mg = screenW * 0.055f;
-        float cx = pW / 2f;
-        float y  = screenH * 0.07f;
-
-        txt.setTextAlign(Paint.Align.LEFT);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-        txt.setTextSize(cell * 0.62f);
-        txt.setColor(TXT_BRIGHT);
-        canvas.drawText("SETTINGS", px + mg, y, txt);
-        txt.setTextAlign(Paint.Align.RIGHT);
-        txt.setTextSize(cell * 0.52f);
-        txt.setColor(TXT_MID);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-        canvas.drawText("\u2715", screenW - mg, y, txt);
-
-        y += cell * 0.8f;
-
-        Object[][] items = {
-            {"GAME",          null},
-            {"Ghost Piece",   "showGhost"},
-            {"Grid Lines",    "showGrid"},
-            {"VISUAL",        null},
-            {"Reduce Motion", "reducedMotion"},
-            {"ACCESSIBILITY", null},
-            {"High Contrast", "highContrast"},
-            {"HAPTICS",       null},
-            {"Vibration",     "hapticsOn"},
-            {"COLOR THEME",   null},
-            {"Default",       "theme:0"},
-            {"Grayscale",     "theme:1"},
-            {"Game Boy",      "theme:2"},
-            {"FONT",          null},
-            {"Monospace",     "monoFont"},
-        };
-
-        for (Object[] item : items) {
-            String label = (String) item[0];
-            String key   = (String) item[1];
-            if (key == null) {
-                y += cell * 0.18f;
-                txt.setTextAlign(Paint.Align.LEFT);
-                txt.setTextSize(cell * 0.28f);
-                txt.setColor(ACCENT);
-                txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-                canvas.drawText(label, px + mg, y, txt);
-                fill.setStyle(Paint.Style.FILL);
-                fill.setColor(ACCENT_DIM);
-                canvas.drawRect(px + mg, y + cell * 0.08f, screenW - mg, y + cell * 0.09f, fill);
-                txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-                y += cell * 0.55f;
-            } else {
-                boolean isRadio = key.startsWith("theme:");
-                float rH = cell * 0.85f;
-                txt.setTextAlign(Paint.Align.LEFT);
-                txt.setTextSize(cell * 0.37f);
-                txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-
-                if (isRadio) {
-                    int themeVal = Integer.parseInt(key.substring(6));
-                    boolean sel = (colorTheme == themeVal);
-                    txt.setColor(sel ? TXT_BRIGHT : TXT_MID);
-                    canvas.drawText(label, px + mg, y + rH * 0.63f, txt);
-                    float rR = cell * 0.22f;
-                    float rX = screenW - mg - rR, rY = y + rH / 2f;
-                    fill.setStyle(Paint.Style.STROKE);
-                    fill.setStrokeWidth(1.8f);
-                    fill.setColor(sel ? ACCENT : BORDER);
-                    canvas.drawCircle(rX, rY, rR, fill);
-                    fill.setStyle(Paint.Style.FILL);
-                    if (sel) {
-                        fill.setColor(ACCENT);
-                        canvas.drawCircle(rX, rY, rR * 0.52f, fill);
-                    }
-                } else {
-                    txt.setColor(TXT_BRIGHT);
-                    canvas.drawText(label, px + mg, y + rH * 0.63f, txt);
-                    boolean on = getSetting(key);
-                    float swW = cell * 1.1f, swH = cell * 0.52f;
-                    float swX = screenW - mg - swW, swY = y + (rH - swH) / 2f;
-                    fill.setStyle(Paint.Style.FILL);
-                    fill.setColor(on ? ACCENT : BORDER);
-                    canvas.drawRoundRect(swX, swY, swX + swW, swY + swH, swH/2f, swH/2f, fill);
-                    float kR = swH * 0.40f;
-                    float kX = on ? swX + swW - kR - swH*0.1f : swX + kR + swH*0.1f;
-                    fill.setColor(0xFFFFFFFF);
-                    canvas.drawCircle(kX, swY + swH/2f, kR, fill);
-                }
-                y += rH;
-            }
-        }
     }
 
     boolean getSetting(String key) {
@@ -1515,7 +854,7 @@ public class TetrisView extends View {
             float dist = dist(x, y, touchStartX, touchStartY);
             long  dur  = System.currentTimeMillis() - touchStartMs;
             if (dist < TAP_MAX_DIST && dur < 230) {
-                rotate();
+                rotate(touchStartX >= screenW / 2f);  // right half = CW, left half = CCW
             } else if (!lockedThis) {
                 float vy = velocityY(), vx = velocityX();
                 if (Math.abs(vy) > Math.abs(vx) * 0.8f) {
@@ -1526,74 +865,6 @@ public class TetrisView extends View {
         }
 
         return true;
-    }
-
-    void drawStatsOverlay(Canvas canvas) {
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(withAlpha(BG, 0xCC));
-        canvas.drawRect(0, 0, screenW, screenH, fill);
-
-        float cx = screenW / 2f;
-        float cW = screenW * 0.84f, cH = screenH * 0.56f;
-        float cX = (screenW - cW) / 2f, cY = (screenH - cH) / 2f;
-        drawCard(canvas, cX, cY, cW, cH, BORDER);
-
-        txt.setTextAlign(Paint.Align.CENTER);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-        txt.setTextSize(cell * 0.58f);
-        txt.setColor(TXT_BRIGHT);
-        canvas.drawText("STATS", cx, cY + cH * 0.14f, txt);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-
-        String[] slabels = {"BEST SCORE", "GAMES", "TOTAL LINES", "BEST LEVEL", "PIECES"};
-        String[] svalues = {
-            fmtScore(highScore),
-            String.valueOf(statGames),
-            String.valueOf(statTotalLines),
-            String.valueOf(statBestLevel),
-            String.valueOf(statTotalPieces),
-        };
-        float rowH = cH * 0.13f;
-        float startY = cY + cH * 0.22f;
-        for (int i = 0; i < 5; i++) {
-            float ry = startY + rowH * i + rowH * 0.55f;
-            txt.setTextSize(cell * 0.29f);
-            txt.setColor(TXT_DIM);
-            txt.setTextAlign(Paint.Align.LEFT);
-            canvas.drawText(slabels[i], cX + cW * 0.08f, ry, txt);
-            txt.setTextSize(cell * 0.42f);
-            txt.setColor(i == 0 ? ACCENT : TXT_BRIGHT);
-            txt.setTypeface(i == 0 ? Typeface.create(fontName(), Typeface.BOLD)
-                                   : Typeface.create(fontName(), Typeface.NORMAL));
-            txt.setTextAlign(Paint.Align.RIGHT);
-            canvas.drawText(svalues[i], cX + cW * 0.92f, ry, txt);
-            txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-            if (i < 4) {
-                fill.setColor(BORDER);
-                canvas.drawRect(cX + cW*0.06f, startY + rowH*(i+1),
-                    cX + cW*0.94f, startY + rowH*(i+1) + 1f, fill);
-            }
-        }
-        // Reset best score button
-        float rBtnW = cW * 0.52f, rBtnH = cell * 0.72f;
-        float rBtnX = cx - rBtnW / 2f, rBtnY = cY + cH * 0.77f;
-        resetBestZone = new RectF(rBtnX, rBtnY, rBtnX + rBtnW, rBtnY + rBtnH);
-        fill.setStyle(Paint.Style.STROKE);
-        fill.setStrokeWidth(1.5f);
-        fill.setColor(0xFF663333);
-        canvas.drawRoundRect(resetBestZone, cardR * 0.5f, cardR * 0.5f, fill);
-        fill.setStyle(Paint.Style.FILL);
-        txt.setTextSize(cell * 0.30f);
-        txt.setColor(0xFFCC4444);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.BOLD));
-        txt.setTextAlign(Paint.Align.CENTER);
-        canvas.drawText("RESET BEST SCORE", cx, rBtnY + rBtnH * 0.66f, txt);
-        txt.setTypeface(Typeface.create(fontName(), Typeface.NORMAL));
-
-        txt.setTextSize(cell * 0.26f);
-        txt.setColor(TXT_DIM);
-        txt.setTextAlign(Paint.Align.CENTER);
-        canvas.drawText("tap anywhere else to close", cx, cY + cH * 0.95f, txt);
     }
 
     void handleMenuTap(float x, float y) {
@@ -1646,6 +917,7 @@ public class TetrisView extends View {
             {"Default",       "theme:0"},
             {"Grayscale",     "theme:1"},
             {"Game Boy",      "theme:2"},
+            {"ASCII",         "theme:3"},
             {"FONT",          null},
             {"Monospace",     "monoFont"},
         };
